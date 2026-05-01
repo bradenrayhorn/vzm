@@ -101,8 +101,7 @@
         contents = {
           # Seed the ESP for first boot. Afterwards, NixOS/systemd-boot manages
           # /boot across rebuilds and writes generation-specific entries.
-          "/EFI/BOOT/BOOTAA64.EFI".source =
-            "${pkgs.systemd}/lib/systemd/boot/efi/systemd-bootaa64.efi";
+          "/EFI/BOOT/BOOTAA64.EFI".source = "${pkgs.systemd}/lib/systemd/boot/efi/systemd-bootaa64.efi";
           "/EFI/systemd/systemd-bootaa64.efi".source =
             "${pkgs.systemd}/lib/systemd/boot/efi/systemd-bootaa64.efi";
           "/EFI/nixos/initial-kernel.efi".source =
@@ -157,32 +156,6 @@
   networking.firewall.enable = true;
   networking.firewall.allowedTCPPorts = [ 22 ];
 
-  systemd.services.vzm-data-disk = {
-    description = "Prepare and mount the persistent vzm data disk";
-    wantedBy = [ "multi-user.target" ];
-    wants = [ "systemd-udev-settle.service" ];
-    after = [
-      "systemd-udev-settle.service"
-      "local-fs.target"
-    ];
-    unitConfig.ConditionPathExists = "/dev/vdb";
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-    };
-    script = ''
-      mkdir -p /data
-      if ! ${pkgs.util-linux}/bin/blkid /dev/vdb >/dev/null 2>&1; then
-        ${pkgs.e2fsprogs}/bin/mkfs.ext4 -F -L vzm-data /dev/vdb
-      fi
-      if ! ${pkgs.util-linux}/bin/mountpoint -q /data; then
-        ${pkgs.util-linux}/bin/mount -t ext4 /dev/vdb /data
-      fi
-      chown braden:braden /data
-      chmod 700 /data
-    '';
-  };
-
   environment.systemPackages = with pkgs; [
     socat
     vim
@@ -192,87 +165,6 @@
 
   environment.variables = {
     EDITOR = "vim";
-    VZM_ROOT_MODE = "persistent";
-    VZM_DATA_MOUNT = "/data";
-    HTTP_PROXY = "http://127.0.0.1:3128";
-    HTTPS_PROXY = "http://127.0.0.1:3128";
-    http_proxy = "http://127.0.0.1:3128";
-    https_proxy = "http://127.0.0.1:3128";
-    NO_PROXY = "localhost,127.0.0.1,::1";
-    no_proxy = "localhost,127.0.0.1,::1";
-    SSL_CERT_FILE = "/run/vzm/ca-bundle.crt";
-    NIX_SSL_CERT_FILE = "/run/vzm/ca-bundle.crt";
-  };
-
-  # The interactive `nix` client may see the proxy environment above, but
-  # actual downloads are often performed by the system nix-daemon. Propagate
-  # the same proxy/CA settings there so substituter fetches also traverse the
-  # host HTTPS proxy and trigger approvals instead of attempting direct DNS.
-  systemd.services.nix-daemon.environment = {
-    HTTP_PROXY = "http://127.0.0.1:3128";
-    HTTPS_PROXY = "http://127.0.0.1:3128";
-    http_proxy = "http://127.0.0.1:3128";
-    https_proxy = "http://127.0.0.1:3128";
-    NO_PROXY = "localhost,127.0.0.1,::1";
-    no_proxy = "localhost,127.0.0.1,::1";
-    SSL_CERT_FILE = "/run/vzm/ca-bundle.crt";
-    NIX_SSL_CERT_FILE = "/run/vzm/ca-bundle.crt";
-  };
-
-  systemd.services.vzm-proxy-ca = {
-    description = "Fetch the vzm HTTPS proxy CA from the host";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "systemd-modules-load.service" ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-    };
-    script = ''
-      mkdir -p /run/vzm
-      ${pkgs.socat}/bin/socat -u VSOCK-CONNECT:2:3129 - > /run/vzm/proxy-ca.pem
-      cat /etc/ssl/certs/ca-certificates.crt /run/vzm/proxy-ca.pem > /run/vzm/ca-bundle.crt
-      chmod 0644 /run/vzm/proxy-ca.pem /run/vzm/ca-bundle.crt
-    '';
-  };
-
-  systemd.services.vzm-https-proxy = {
-    description = "Expose the host vzm HTTPS proxy on localhost";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "vzm-proxy-ca.service" ];
-    requires = [ "vzm-proxy-ca.service" ];
-    serviceConfig = {
-      ExecStart = "${pkgs.socat}/bin/socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:2:3128";
-      Restart = "always";
-      RestartSec = "1s";
-    };
-  };
-
-  systemd.services.vzm-port-forward-3000 = {
-    description = "Expose guest localhost:3000 over vsock";
-    wantedBy = [ "multi-user.target" ];
-    after = [
-      "systemd-modules-load.service"
-      "network.target"
-    ];
-    serviceConfig = {
-      ExecStart = "${pkgs.socat}/bin/socat VSOCK-LISTEN:3000,fork,reuseaddr TCP:127.0.0.1:3000";
-      Restart = "always";
-      RestartSec = "1s";
-    };
-  };
-
-  systemd.services.vzm-port-forward-5173 = {
-    description = "Expose guest localhost:5173 over vsock";
-    wantedBy = [ "multi-user.target" ];
-    after = [
-      "systemd-modules-load.service"
-      "network.target"
-    ];
-    serviceConfig = {
-      ExecStart = "${pkgs.socat}/bin/socat VSOCK-LISTEN:5173,fork,reuseaddr TCP:127.0.0.1:5173";
-      Restart = "always";
-      RestartSec = "1s";
-    };
   };
 
   programs.zsh.enable = true;
