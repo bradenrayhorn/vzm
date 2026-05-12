@@ -1,5 +1,5 @@
 {
-  description = "UEFI-bootable NixOS guest image for vzm";
+  description = "Direct-boot NixOS guest bundle for vzm";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -16,12 +16,44 @@
         modules = [ ./configuration.nix ];
       };
 
-      guestImage = pkgs.runCommand "guest-image" { } ''
+      rootfsImage = pkgs.callPackage "${nixpkgs}/nixos/lib/make-squashfs.nix" {
+        storeContents = [ vm.config.system.build.toplevel ];
+      };
+
+      kernelCommandLine = nixpkgs.lib.concatStringsSep " " (
+        [
+          "root=/dev/vda"
+          "rootfstype=squashfs"
+          "init=${vm.config.system.build.toplevel}/init"
+        ]
+        ++ vm.config.boot.kernelParams
+      );
+
+      guestManifest = pkgs.writeText "manifest.json" (builtins.toJSON {
+        schemaVersion = 1;
+        architecture = "aarch64";
+        kernel = "kernel";
+        initrd = "initrd";
+        rootfs = "rootfs.squashfs";
+        rootMode = "persistent";
+        commandLine = kernelCommandLine;
+        requiredDisks = [ "data" ];
+      });
+
+      guestBundle = pkgs.runCommand "guest-bundle" { } ''
         mkdir -p "$out"
 
-        cp ${vm.config.system.build.image}/${vm.config.image.filePath} "$out/${vm.config.image.fileName}"
-        cp ${vm.config.system.build.image}/repart-output.json "$out/repart-output.json"
-        printf '%s\n' '${vm.config.image.fileName}' > "$out/image-file-name.txt"
+        cp ${vm.config.system.build.kernel}/${vm.config.system.boot.loader.kernelFile} "$out/kernel"
+
+        initrd_source=${vm.config.system.build.initialRamdisk}
+        if [ -d "$initrd_source" ]; then
+          cp "$initrd_source"/initrd "$out/initrd"
+        else
+          cp "$initrd_source" "$out/initrd"
+        fi
+
+        cp ${rootfsImage} "$out/rootfs.ext4"
+        cp ${guestManifest} "$out/manifest.json"
       '';
     in
     {
@@ -30,8 +62,7 @@
       };
 
       packages.${system} = {
-        guest-image = guestImage;
-        guest-bundle = guestImage;
+        guest-bundle = guestBundle;
       };
     };
 }
