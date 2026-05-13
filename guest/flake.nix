@@ -52,7 +52,7 @@
           cp "$initrd_source" "$out/initrd"
         fi
 
-        cp ${rootfsImage} "$out/rootfs.ext4"
+        cp ${rootfsImage} "$out/rootfs.squashfs"
         cp ${guestManifest} "$out/manifest.json"
       '';
     in
