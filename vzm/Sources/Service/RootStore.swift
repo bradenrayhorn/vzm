@@ -37,7 +37,7 @@ struct RootStore {
             throw Error.invalidSourceDirectory(sourceDirectoryURL.path)
         }
 
-        let requiredFiles = ["initrd", "kernel", "rootfs.squashfs"]
+        let requiredFiles = ["initrd", "kernel", "manifest.json", "rootfs.squashfs"]
         let missingFiles = requiredFiles.filter { requiredFile in
             !fileManager.fileExists(atPath: sourceDirectoryURL.appendingPathComponent(requiredFile).path)
         }

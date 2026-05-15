@@ -58,11 +58,14 @@
     "usbhid"
     "usb_storage"
     "sr_mod"
+    "overlay"
+    "squashfs"
   ];
   boot.initrd.kernelModules = [
     "virtiofs"
     "vsock"
     "vmw_vsock_virtio_transport"
+    "overlay"
   ];
   boot.kernelModules = [
     "vsock"
@@ -75,9 +78,66 @@
   boot.kernelPackages = pkgs.linuxPackages_latest;
   boot.supportedFilesystems.zfs = lib.mkForce false;
 
+  # Ephemeral root: stage 1 mounts this tmpfs at /mnt-root, then mounts the
+  # immutable squashfs Nix store below before switching to stage 2.
   fileSystems."/" = {
-    device = "/dev/disk/by-label/vzm-root";
-    fsType = "ext4";
+    device = "none";
+    fsType = "tmpfs";
+    options = [ "mode=0755" ];
+  };
+
+  # The VM attaches rootfs.squashfs as /dev/vda.  The image produced by
+  # nixos/lib/make-squashfs.nix contains the closure as store entries at the
+  # filesystem root, so mount it as the lowerdir for /nix/store rather than as
+  # the final root filesystem.
+  fileSystems."/nix/.ro-store" = {
+    device = "/dev/vda";
+    fsType = "squashfs";
+    options = [ "ro" ];
+    neededForBoot = true;
+  };
+
+  # Ephemeral writable layer for the Nix store and /nix/var.  Anything built or
+  # registered at runtime disappears on reboot; the squashfs lowerdir remains
+  # immutable.
+  fileSystems."/nix/.rw-store" = {
+    device = "none";
+    fsType = "tmpfs";
+    options = [ "mode=0755" ];
+    neededForBoot = true;
+  };
+
+  fileSystems."/nix/store" = {
+    overlay = {
+      lowerdir = [ "/nix/.ro-store" ];
+      upperdir = "/nix/.rw-store/store";
+      workdir = "/nix/.rw-store/work";
+    };
+    neededForBoot = true;
+  };
+
+  systemd.services.register-nix-store = {
+    description = "Register immutable squashfs Nix store paths";
+    unitConfig.DefaultDependencies = false;
+    wantedBy = [ "sysinit.target" ];
+    before = [
+      "sysinit.target"
+      "shutdown.target"
+      "nix-daemon.socket"
+      "nix-daemon.service"
+    ];
+    after = [ "local-fs.target" ];
+    conflicts = [ "shutdown.target" ];
+    restartIfChanged = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      ${lib.getExe' config.nix.package "nix-store"} --load-db < /nix/store/nix-path-registration
+      touch /etc/NIXOS
+      ${lib.getExe' config.nix.package "nix-env"} -p /nix/var/nix/profiles/system --set /run/current-system
+    '';
   };
 
   networking.useDHCP = false;

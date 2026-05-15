@@ -22,8 +22,8 @@
 
       kernelCommandLine = nixpkgs.lib.concatStringsSep " " (
         [
-          "root=/dev/vda"
-          "rootfstype=squashfs"
+          # The initrd mounts / as tmpfs from fileSystems."/", then mounts
+          # /dev/vda (rootfs.squashfs) as the immutable /nix/store lowerdir.
           "init=${vm.config.system.build.toplevel}/init"
         ]
         ++ vm.config.boot.kernelParams
@@ -35,7 +35,7 @@
         kernel = "kernel";
         initrd = "initrd";
         rootfs = "rootfs.squashfs";
-        rootMode = "persistent";
+        rootMode = "immutable";
         commandLine = kernelCommandLine;
         requiredDisks = [ "data" ];
       });

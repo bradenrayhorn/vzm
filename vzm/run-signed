@@ -1,0 +1,15 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+SCRIPT_DIR="${0:A:h}"
+BUILD_DIR="$SCRIPT_DIR/.build/arm64-apple-macosx/debug"
+BINARY="$BUILD_DIR/vzm"
+ENTITLEMENTS="$SCRIPT_DIR/vzm.entitlements"
+
+cd "$SCRIPT_DIR"
+
+swift build
+codesign -s - -f --entitlements "$ENTITLEMENTS" "$BINARY"
+exec "$BINARY" "$@"
+
