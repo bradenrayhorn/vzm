@@ -1,5 +1,5 @@
 {
-  description = "Direct-boot NixOS guest bundle for vzm";
+  description = "Direct-boot NixOS guest-builder bundle for vzm";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -9,10 +9,24 @@
     { nixpkgs, ... }:
     let
       system = "aarch64-linux";
+      lib = nixpkgs.lib;
       pkgs = import nixpkgs { inherit system; };
 
-      vm = nixpkgs.lib.nixosSystem {
+      builderAgent = pkgs.writeShellApplication {
+        name = "vzm-builder-agent";
+        runtimeInputs = with pkgs; [
+          coreutils
+          findutils
+          jq
+          nix
+          util-linux
+        ];
+        text = builtins.readFile ./builder-agent.sh;
+      };
+
+      vm = lib.nixosSystem {
         inherit system;
+        specialArgs = { inherit builderAgent; };
         modules = [ ./configuration.nix ];
       };
 
@@ -20,10 +34,8 @@
         storeContents = [ vm.config.system.build.toplevel ];
       };
 
-      kernelCommandLine = nixpkgs.lib.concatStringsSep " " (
+      kernelCommandLine = lib.concatStringsSep " " (
         [
-          # The initrd mounts / as tmpfs from fileSystems."/", then mounts
-          # /dev/vda (rootfs.squashfs) as the immutable /nix/store lowerdir.
           "init=${vm.config.system.build.toplevel}/init"
         ]
         ++ vm.config.boot.kernelParams
@@ -37,10 +49,10 @@
         rootfs = "rootfs.squashfs";
         rootMode = "immutable";
         commandLine = kernelCommandLine;
-        requiredDisks = [ "data" ];
+        requiredDisks = [ "work" ];
       });
 
-      guestBundle = pkgs.runCommand "guest-bundle" { } ''
+      builderGuestBundle = pkgs.runCommand "builder-guest-bundle" { } ''
         mkdir -p "$out"
 
         cp ${vm.config.system.build.kernel}/${vm.config.system.boot.loader.kernelFile} "$out/kernel"
@@ -58,12 +70,13 @@
     in
     {
       nixosConfigurations = {
-        vm = vm;
+        builder = vm;
       };
 
       packages.${system} = {
-        default = guestBundle;
-        guest-bundle = guestBundle;
+        default = builderGuestBundle;
+        guest-bundle = builderGuestBundle;
+        builder-guest-bundle = builderGuestBundle;
       };
     };
 }
