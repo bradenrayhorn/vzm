@@ -2,7 +2,7 @@ import ArgumentParser
 import Foundation
 
 @main
-struct VZM: ParsableCommand {
+struct VZM: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage VMs",
         subcommands: [Create.self, Run.self, ImportRoot.self, BuildRoot.self]
@@ -25,8 +25,19 @@ struct Create: ParsableCommand {
     }
 }
 
-struct Run: ParsableCommand {
+struct Run: AsyncParsableCommand {
     @Argument var name: String
+
+    mutating func run() async throws {
+        let vmStore = try VMStore()
+        let vm = try vmStore.loadVM(named: name)
+
+        let rootStore = try RootStore()
+        let root = try rootStore.loadRoot(named: vm.manifest.root)
+
+        let runner = try await Runner(vmBundle: vm, rootBundle: root)
+        try await runner.run()
+    }
 }
 
 struct ImportRoot: ParsableCommand {

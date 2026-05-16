@@ -1,5 +1,10 @@
 import Foundation
 
+struct StoredVM {
+    let directoryURL: URL
+    let manifest: VMManifest
+}
+
 struct VMManifest: Codable {
     let name: String
     let root: String
@@ -9,11 +14,14 @@ struct VMManifest: Codable {
 struct VMStore {
     enum Error: LocalizedError {
         case rootDoesNotExist(String)
+        case vmDoesNotExist(String)
 
         var errorDescription: String? {
             switch self {
             case .rootDoesNotExist(let root):
                 return "Root does not exist: \(root)"
+            case .vmDoesNotExist(let name):
+                return "VM does not exist: \(name)"
             }
         }
     }
@@ -53,6 +61,18 @@ struct VMStore {
         try data.write(to: manifestURL)
 
         return vmDirectoryURL
+    }
+
+    func loadVM(named name: String) throws -> StoredVM {
+        let vmDirectoryURL = vmsDirectoryURL.appendingPathComponent(name, isDirectory: true)
+        guard (try? vmDirectoryURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else {
+            throw Error.vmDoesNotExist(name)
+        }
+
+        let manifestURL = vmDirectoryURL.appendingPathComponent("manifest.json")
+        let data = try Data(contentsOf: manifestURL)
+        let manifest = try JSONDecoder().decode(VMManifest.self, from: data)
+        return StoredVM(directoryURL: vmDirectoryURL, manifest: manifest)
     }
 }
 
