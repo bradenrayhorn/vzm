@@ -1,6 +1,15 @@
 import Foundation
 import Virtualization
 
+enum RunnerError : Error {
+    case vsockError(message: String)
+}
+
+protocol VZMService: Sendable {
+    func start() async throws
+    func stop() async
+}
+
 @MainActor
 class Runner {
 
@@ -22,7 +31,26 @@ class Runner {
 
     func run() async throws {
         try await machine.start()
-        try await stopDelegate.waitForStop()
+
+        guard machine.socketDevices.count == 1, let virtioDevice = machine.socketDevices.first as? VZVirtioSocketDevice else {
+            throw RunnerError.vsockError(message: "Missing VZVirtioSocketDevice")
+        }
+
+        let sshListener = try SSHListener(port: vmBundle.manifest.sshPort, virtioDevice: virtioDevice)
+        try await withThrowingTaskGroup(of: Void.self) { group in 
+            group.addTask { @MainActor in
+                try await self.stopDelegate.waitForStop()
+            }
+
+            group.addTask {
+                try await sshListener.start()
+            }
+
+            // wait for first finished task or failed task
+            try await group.next()
+            group.cancelAll()
+        }
+
     }
 }
 
@@ -32,6 +60,8 @@ struct VZConfiguration {
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
         console.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: nil, fileHandleForWriting: FileHandle.standardError)
+
+        let vsock = VZVirtioSocketDeviceConfiguration()
 
         configuration.platform = VZGenericPlatformConfiguration()
 
@@ -50,6 +80,7 @@ struct VZConfiguration {
         configuration.memorySize = 8 * 1024 * 1024 * 1024
         configuration.networkDevices = []
         configuration.directorySharingDevices = []
+        configuration.socketDevices = [vsock]
 
         try configuration.validate()
         return configuration
