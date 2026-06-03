@@ -67,10 +67,7 @@
     "vmw_vsock_virtio_transport"
     "overlay"
   ];
-  boot.kernelModules = [
-    "vsock"
-    "vmw_vsock_virtio_transport"
-  ];
+  boot.kernelModules = [];
   boot.extraModulePackages = [ ];
 
   nixpkgs.hostPlatform = lib.mkDefault "aarch64-linux";
@@ -150,6 +147,44 @@
     socat
     vim
   ];
+
+  systemd.services.vzm-shares = {
+    description = "Mount vzm shared directories";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "multi-user.target" "sshd.service" ];
+    after = [ "local-fs.target" ];
+    restartIfChanged = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      set -eu
+
+      for token in $(${pkgs.coreutils}/bin/cat /proc/cmdline); do
+        case "$token" in
+          vzm.share=*)
+            spec="''${token#vzm.share=}"
+            tag="''${spec%%:*}"
+            mount_path="''${spec#*:}"
+
+            if [ -z "$tag" ] || [ -z "$mount_path" ] || [ "$tag" = "$spec" ]; then
+              echo "vzm-shares: invalid share spec: $spec" >&2
+              exit 1
+            fi
+
+            ${pkgs.coreutils}/bin/mkdir -p "$mount_path"
+
+            if ${pkgs.gnugrep}/bin/grep -Fqs " $mount_path virtiofs " /proc/mounts; then
+              continue
+            fi
+
+            ${pkgs.util-linux}/bin/mount -t virtiofs "$tag" "$mount_path"
+            ;;
+        esac
+      done
+    '';
+  };
 
   nixpkgs.config.allowUnfree = true;
 

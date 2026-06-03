@@ -13,15 +13,48 @@ struct Create: ParsableCommand {
     @Argument var name: String
     @Option var root: String
     @Option var sshPort: String
+    @Option(name: .long, help: "Repeatable share mapping in the form HOST_PATH:GUEST_MOUNT_PATH")
+    var share: [String] = []
 
     mutating func run() throws {
         guard let parsedSSHPort = UInt16(sshPort) else {
             throw ValidationError("Invalid --ssh-port: \(sshPort)")
         }
 
+        let shares = try share.enumerated().map { index, value in
+            try parseShare(value, index: index)
+        }
+
         let vmStore = try VMStore()
-        let createdURL = try vmStore.createVM(named: name, root: root, sshPort: parsedSSHPort)
+        let createdURL = try vmStore.createVM(named: name, root: root, sshPort: parsedSSHPort, shares: shares)
         print("Created VM '\(name)' at \(createdURL.path)")
+    }
+
+    private func parseShare(_ value: String, index: Int) throws -> VMShare {
+        guard let separatorIndex = value.firstIndex(of: ":") else {
+            throw ValidationError("Invalid --share '\(value)'. Expected HOST_PATH:GUEST_MOUNT_PATH")
+        }
+
+        let hostPath = String(value[..<separatorIndex])
+        let mountPath = String(value[value.index(after: separatorIndex)...])
+
+        guard !hostPath.isEmpty, !mountPath.isEmpty else {
+            throw ValidationError("Invalid --share '\(value)'. Expected HOST_PATH:GUEST_MOUNT_PATH")
+        }
+
+        let resolvedHostPath = resolveHostPath(hostPath)
+        return VMShare(tag: "vzmshare\(index)", hostPath: resolvedHostPath, mountPath: mountPath)
+    }
+
+    private func resolveHostPath(_ path: String, fileManager: FileManager = .default) -> String {
+        let expandedPath = NSString(string: path).expandingTildeInPath
+        let url: URL
+        if expandedPath.hasPrefix("/") {
+            url = URL(fileURLWithPath: expandedPath)
+        } else {
+            url = URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent(expandedPath)
+        }
+        return url.standardizedFileURL.path
     }
 }
 

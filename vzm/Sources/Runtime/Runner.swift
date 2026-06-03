@@ -67,7 +67,7 @@ struct VZConfiguration {
 
         let bootLoader = VZLinuxBootLoader(kernelURL: rootBundle.kernelURL)
         bootLoader.initialRamdiskURL = rootBundle.initrdURL
-        bootLoader.commandLine = rootBundle.manifest.commandLine + " console=hvc0" // serial console should be optional one day
+        bootLoader.commandLine = buildKernelCommandLine(vmBundle: vmBundle, rootBundle: rootBundle)
         configuration.bootLoader = bootLoader
 
         let rootFs = try VZDiskImageStorageDeviceAttachment(url: rootBundle.rootfsURL, readOnly: true)
@@ -79,11 +79,27 @@ struct VZConfiguration {
         configuration.cpuCount = 4
         configuration.memorySize = 8 * 1024 * 1024 * 1024
         configuration.networkDevices = []
-        configuration.directorySharingDevices = []
+        configuration.directorySharingDevices = vmBundle.manifest.shares.map { share in
+            let sharedDirectory = VZSharedDirectory(url: URL(fileURLWithPath: share.hostPath), readOnly: false)
+            let directoryShare = VZSingleDirectoryShare(directory: sharedDirectory)
+            let directorySharingDevice = VZVirtioFileSystemDeviceConfiguration(tag: share.tag)
+            directorySharingDevice.share = directoryShare
+            return directorySharingDevice
+        }
         configuration.socketDevices = [vsock]
 
         try configuration.validate()
         return configuration
+    }
+
+    private func buildKernelCommandLine(vmBundle: StoredVM, rootBundle: RootBundle) -> String {
+        let shareArguments = vmBundle.manifest.shares.map { share in
+            "vzm.share=\(share.tag):\(share.mountPath)"
+        }
+
+        // eventually make serial console output optional
+        return ([rootBundle.manifest.commandLine, "console=hvc0"] + shareArguments)
+            .joined(separator: " ")
     }
 }
 
