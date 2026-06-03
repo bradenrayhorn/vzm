@@ -1,20 +1,21 @@
-name: Build Guest UEFI Disk
+name: Build Guest Builder Bundle
 
 on:
   push:
     branches:
       - main
     paths:
-      - guest/flake.nix
-      - guest/flake.lock
-      - guest/configuration.nix
+      - builder-guest/flake.nix
+      - builder-guest/flake.lock
+      - builder-guest/configuration.nix
+      - builder-guest/builder-agent.sh
       - .github/workflows/build.yml
 
 permissions:
   contents: write
 
 jobs:
-  build-disk:
+  build-guest-builder:
     runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -33,23 +34,27 @@ jobs:
           VERSION=$(date +'%y.%m').${{ github.run_number }}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Build guest UEFI disk
+      - name: Build guest-builder bundle
         run: |
           . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-          nix build ./guest#packages.aarch64-linux.guest-image --print-build-logs
+          nix build ./builder-guest#packages.aarch64-linux.builder-guest-bundle --print-build-logs
 
-      - name: Package guest UEFI disk
+      - name: Package guest-builder bundle
         run: |
           mkdir -p release
           RESULT_PATH=$(readlink -f result)
           test -d "$RESULT_PATH"
-          tar -C "$RESULT_PATH" -czf "release/nixos-${{ steps.version.outputs.version }}-aarch64-guest-uefi-disk.tar.gz" .
+          ZIP_PATH="$PWD/release/vzm-${{ steps.version.outputs.version }}-aarch64-guest-builder.zip"
+          (
+            cd "$RESULT_PATH"
+            zip -r "$ZIP_PATH" kernel initrd rootfs.squashfs manifest.json
+          )
 
-      - name: Upload guest UEFI disk artifact
+      - name: Upload guest-builder artifact
         uses: actions/upload-artifact@v4
         with:
-          name: guest-uefi-disk
-          path: release/nixos-${{ steps.version.outputs.version }}-aarch64-guest-uefi-disk.tar.gz
+          name: guest-builder
+          path: release/vzm-${{ steps.version.outputs.version }}-aarch64-guest-builder.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -59,4 +64,4 @@ jobs:
         run: |
           gh release create "v${{ steps.version.outputs.version }}" \
             --title "v${{ steps.version.outputs.version }}" \
-            "release/nixos-${{ steps.version.outputs.version }}-aarch64-guest-uefi-disk.tar.gz"
+            "release/vzm-${{ steps.version.outputs.version }}-aarch64-guest-builder.zip"
