@@ -6,7 +6,6 @@ struct RootManifest: Codable {
     let commandLine: String
     let initrd: String
     let kernel: String
-    let requiredDisks: [String]
     let rootMode: String
     let rootfs: String
 }

@@ -49,7 +49,6 @@
         rootfs = "rootfs.squashfs";
         rootMode = "immutable";
         commandLine = kernelCommandLine;
-        requiredDisks = [ "work" ];
       });
 
       builderGuestBundle = pkgs.runCommand "builder-guest-bundle" { } ''

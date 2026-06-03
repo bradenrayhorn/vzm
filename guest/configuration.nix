@@ -60,6 +60,7 @@
     "sr_mod"
     "overlay"
     "squashfs"
+    "ext4"
   ];
   boot.initrd.kernelModules = [
     "virtiofs"
@@ -148,8 +149,8 @@
     vim
   ];
 
-  systemd.services.vzm-shares = {
-    description = "Mount vzm shared directories";
+  systemd.services.vzm-mounts = {
+    description = "Mount vzm shared directories and disks";
     wantedBy = [ "multi-user.target" ];
     before = [ "multi-user.target" "sshd.service" ];
     after = [ "local-fs.target" ];
@@ -169,7 +170,7 @@
             mount_path="''${spec#*:}"
 
             if [ -z "$tag" ] || [ -z "$mount_path" ] || [ "$tag" = "$spec" ]; then
-              echo "vzm-shares: invalid share spec: $spec" >&2
+              echo "vzm-mounts: invalid share spec: $spec" >&2
               exit 1
             fi
 
@@ -180,6 +181,44 @@
             fi
 
             ${pkgs.util-linux}/bin/mount -t virtiofs "$tag" "$mount_path"
+            ;;
+          vzm.disk=*)
+            spec="''${token#vzm.disk=}"
+            name="''${spec%%:*}"
+            rest="''${spec#*:}"
+            filesystem="''${rest%%:*}"
+            mount_path="''${rest#*:}"
+            device="/dev/disk/by-id/virtio-$name"
+
+            if [ -z "$name" ] || [ -z "$filesystem" ] || [ -z "$mount_path" ] || [ "$name" = "$spec" ] || [ "$rest" = "$spec" ] || [ "$mount_path" = "$rest" ]; then
+              echo "vzm-mounts: invalid disk spec: $spec" >&2
+              exit 1
+            fi
+
+            if [ ! -b "$device" ]; then
+              echo "vzm-mounts: missing disk device for $name at $device" >&2
+              exit 1
+            fi
+
+            if ! ${pkgs.util-linux}/bin/blkid "$device" >/dev/null 2>&1; then
+              case "$filesystem" in
+                ext4)
+                  ${pkgs.e2fsprogs}/bin/mkfs.ext4 -F "$device"
+                  ;;
+                *)
+                  echo "vzm-mounts: unsupported filesystem $filesystem for disk $name" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+
+            ${pkgs.coreutils}/bin/mkdir -p "$mount_path"
+
+            if ! ${pkgs.gnugrep}/bin/grep -Fqs " $mount_path $filesystem " /proc/mounts; then
+              ${pkgs.util-linux}/bin/mount -t "$filesystem" "$device" "$mount_path"
+            fi
+
+            ${pkgs.coreutils}/bin/chown braden:braden "$mount_path"
             ;;
         esac
       done

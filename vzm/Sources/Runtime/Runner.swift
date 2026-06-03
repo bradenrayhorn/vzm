@@ -15,6 +15,8 @@ class Runner {
 
     let vmBundle: StoredVM
     let rootBundle: RootBundle
+    let diskBundles: [DiskBundle]
+    let diskLease: DiskLease
     let machine: VZVirtualMachine
     let stopDelegate: VMStopDelegate
 
@@ -22,7 +24,11 @@ class Runner {
         self.vmBundle = vmBundle
         self.rootBundle = rootBundle
 
-        let configuration = try VZConfiguration().build(vmBundle: vmBundle, rootBundle: rootBundle)
+        let diskStore = try DiskStore()
+        self.diskBundles = try vmBundle.manifest.disks.map { try diskStore.loadDisk(named: $0.name) }
+        self.diskLease = try diskStore.acquireLease(for: diskBundles)
+
+        let configuration = try VZConfiguration().build(vmBundle: vmBundle, rootBundle: rootBundle, diskBundles: diskBundles)
         machine = VZVirtualMachine(configuration: configuration)
 
         stopDelegate = VMStopDelegate()
@@ -55,7 +61,7 @@ class Runner {
 }
 
 struct VZConfiguration {
-    func build(vmBundle: StoredVM, rootBundle: RootBundle) throws -> VZVirtualMachineConfiguration {
+    func build(vmBundle: StoredVM, rootBundle: RootBundle, diskBundles: [DiskBundle]) throws -> VZVirtualMachineConfiguration {
         let configuration = VZVirtualMachineConfiguration()
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
@@ -73,9 +79,20 @@ struct VZConfiguration {
         let rootFs = try VZDiskImageStorageDeviceAttachment(url: rootBundle.rootfsURL, readOnly: true)
 
         configuration.serialPorts = [console]
-        configuration.storageDevices = [
-            VZVirtioBlockDeviceConfiguration(attachment: rootFs)
-        ]
+        var storageDevices = [VZStorageDeviceConfiguration]()
+        storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: rootFs))
+        for diskBundle in diskBundles {
+            let attachment = try VZDiskImageStorageDeviceAttachment(
+                url: diskBundle.imageURL,
+                readOnly: false,
+                cachingMode: .automatic,
+                synchronizationMode: .fsync
+            )
+            let blockDevice = VZVirtioBlockDeviceConfiguration(attachment: attachment)
+            blockDevice.blockDeviceIdentifier = diskBundle.manifest.name
+            storageDevices.append(blockDevice)
+        }
+        configuration.storageDevices = storageDevices
         configuration.cpuCount = 4
         configuration.memorySize = 8 * 1024 * 1024 * 1024
         configuration.networkDevices = []
@@ -96,9 +113,12 @@ struct VZConfiguration {
         let shareArguments = vmBundle.manifest.shares.map { share in
             "vzm.share=\(share.tag):\(share.mountPath)"
         }
+        let diskArguments = vmBundle.manifest.disks.map { disk in
+            "vzm.disk=\(disk.name):ext4:\(disk.mountPath)"
+        }
 
         // eventually make serial console output optional
-        return ([rootBundle.manifest.commandLine, "console=hvc0"] + shareArguments)
+        return ([rootBundle.manifest.commandLine, "console=hvc0"] + shareArguments + diskArguments)
             .joined(separator: " ")
     }
 }

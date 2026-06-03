@@ -11,17 +11,24 @@ struct VMShare: Codable {
     let mountPath: String
 }
 
+struct VMDiskMount: Codable {
+    let name: String
+    let mountPath: String
+}
+
 struct VMManifest: Codable {
     let name: String
     let root: String
     let sshPort: UInt16
     let shares: [VMShare]
+    let disks: [VMDiskMount]
 
-    init(name: String, root: String, sshPort: UInt16, shares: [VMShare] = []) {
+    init(name: String, root: String, sshPort: UInt16, shares: [VMShare] = [], disks: [VMDiskMount] = []) {
         self.name = name
         self.root = root
         self.sshPort = sshPort
         self.shares = shares
+        self.disks = disks
     }
 
     enum CodingKeys: String, CodingKey {
@@ -29,6 +36,7 @@ struct VMManifest: Codable {
         case root
         case sshPort
         case shares
+        case disks
     }
 
     init(from decoder: any Decoder) throws {
@@ -37,6 +45,7 @@ struct VMManifest: Codable {
         root = try container.decode(String.self, forKey: .root)
         sshPort = try container.decode(UInt16.self, forKey: .sshPort)
         shares = try container.decodeIfPresent([VMShare].self, forKey: .shares) ?? []
+        disks = try container.decodeIfPresent([VMDiskMount].self, forKey: .disks) ?? []
     }
 }
 
@@ -48,6 +57,9 @@ struct VMStore {
         case invalidShareMountPath(String)
         case duplicateShareMountPath(String)
         case duplicateShareTag(String)
+        case invalidDiskMountPath(String)
+        case duplicateDiskMountPath(String)
+        case duplicateDiskName(String)
 
         var errorDescription: String? {
             switch self {
@@ -63,21 +75,33 @@ struct VMStore {
                 return "Duplicate shared guest mount path: \(path)"
             case .duplicateShareTag(let tag):
                 return "Duplicate shared directory tag: \(tag)"
+            case .invalidDiskMountPath(let path):
+                return "Invalid disk guest mount path: \(path)"
+            case .duplicateDiskMountPath(let path):
+                return "Duplicate disk guest mount path: \(path)"
+            case .duplicateDiskName(let name):
+                return "Duplicate disk name: \(name)"
             }
         }
     }
 
     private let fileManager: FileManager
     private let rootStore: RootStore
+    private let diskStore: DiskStore
     let vmsDirectoryURL: URL
 
     init(fileManager: FileManager = .default) throws {
-        try self.init(fileManager: fileManager, rootStore: RootStore(fileManager: fileManager))
+        try self.init(
+            fileManager: fileManager,
+            rootStore: RootStore(fileManager: fileManager),
+            diskStore: DiskStore(fileManager: fileManager)
+        )
     }
 
-    init(fileManager: FileManager = .default, rootStore: RootStore) throws {
+    init(fileManager: FileManager = .default, rootStore: RootStore, diskStore: DiskStore) throws {
         self.fileManager = fileManager
         self.rootStore = rootStore
+        self.diskStore = diskStore
 
         let paths = try StorePaths(fileManager: fileManager)
         self.vmsDirectoryURL = paths.vmsDirectoryURL
@@ -85,18 +109,21 @@ struct VMStore {
         try fileManager.createDirectory(at: vmsDirectoryURL, withIntermediateDirectories: true)
     }
 
-    func createVM(named name: String, root: String, sshPort: UInt16, shares: [VMShare] = []) throws -> URL {
-        let rootURL = rootStore.rootsDirectoryURL.appendingPathComponent(root, isDirectory: true)
-        guard (try? rootURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else {
+    func createVM(named name: String, root: String, sshPort: UInt16, shares: [VMShare] = [], disks: [VMDiskMount] = []) throws -> URL {
+        let rootBundle: RootBundle
+        do {
+            rootBundle = try rootStore.loadRoot(named: root)
+        } catch RootStore.Error.rootDoesNotExist {
             throw Error.rootDoesNotExist(root)
         }
 
         try validateShares(shares)
+        try validateDisks(disks, rootBundle: rootBundle)
 
         let vmDirectoryURL = vmsDirectoryURL.appendingPathComponent(name, isDirectory: true)
         try fileManager.createDirectory(at: vmDirectoryURL, withIntermediateDirectories: true)
 
-        let manifest = VMManifest(name: name, root: root, sshPort: sshPort, shares: shares)
+        let manifest = VMManifest(name: name, root: root, sshPort: sshPort, shares: shares, disks: disks)
         let manifestURL = vmDirectoryURL.appendingPathComponent("manifest.json")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -137,6 +164,27 @@ struct VMStore {
 
             if !seenTags.insert(share.tag).inserted {
                 throw Error.duplicateShareTag(share.tag)
+            }
+        }
+    }
+
+    private func validateDisks(_ disks: [VMDiskMount], rootBundle: RootBundle) throws {
+        var seenNames = Set<String>()
+        var seenMountPaths = Set<String>()
+
+        for disk in disks {
+            _ = try diskStore.loadDisk(named: disk.name)
+
+            guard isValidGuestMountPath(disk.mountPath) else {
+                throw Error.invalidDiskMountPath(disk.mountPath)
+            }
+
+            if !seenNames.insert(disk.name).inserted {
+                throw Error.duplicateDiskName(disk.name)
+            }
+
+            if !seenMountPaths.insert(disk.mountPath).inserted {
+                throw Error.duplicateDiskMountPath(disk.mountPath)
             }
         }
     }

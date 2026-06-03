@@ -5,7 +5,7 @@ import Foundation
 struct VZM: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage VMs",
-        subcommands: [Create.self, Run.self, ImportRoot.self, BuildRoot.self]
+        subcommands: [Create.self, CreateDisk.self, Run.self, ImportRoot.self, BuildRoot.self]
     )
 }
 
@@ -15,6 +15,8 @@ struct Create: ParsableCommand {
     @Option var sshPort: String
     @Option(name: .long, help: "Repeatable share mapping in the form HOST_PATH:GUEST_MOUNT_PATH")
     var share: [String] = []
+    @Option(name: .long, help: "Repeatable disk mapping in the form DISK_NAME:GUEST_MOUNT_PATH")
+    var disk: [String] = []
 
     mutating func run() throws {
         guard let parsedSSHPort = UInt16(sshPort) else {
@@ -24,9 +26,10 @@ struct Create: ParsableCommand {
         let shares = try share.enumerated().map { index, value in
             try parseShare(value, index: index)
         }
+        let disks = try disk.map(parseDisk)
 
         let vmStore = try VMStore()
-        let createdURL = try vmStore.createVM(named: name, root: root, sshPort: parsedSSHPort, shares: shares)
+        let createdURL = try vmStore.createVM(named: name, root: root, sshPort: parsedSSHPort, shares: shares, disks: disks)
         print("Created VM '\(name)' at \(createdURL.path)")
     }
 
@@ -46,6 +49,21 @@ struct Create: ParsableCommand {
         return VMShare(tag: "vzmshare\(index)", hostPath: resolvedHostPath, mountPath: mountPath)
     }
 
+    private func parseDisk(_ value: String) throws -> VMDiskMount {
+        guard let separatorIndex = value.firstIndex(of: ":") else {
+            throw ValidationError("Invalid --disk '\(value)'. Expected DISK_NAME:GUEST_MOUNT_PATH")
+        }
+
+        let diskName = String(value[..<separatorIndex])
+        let mountPath = String(value[value.index(after: separatorIndex)...])
+
+        guard !diskName.isEmpty, !mountPath.isEmpty else {
+            throw ValidationError("Invalid --disk '\(value)'. Expected DISK_NAME:GUEST_MOUNT_PATH")
+        }
+
+        return VMDiskMount(name: diskName, mountPath: mountPath)
+    }
+
     private func resolveHostPath(_ path: String, fileManager: FileManager = .default) -> String {
         let expandedPath = NSString(string: path).expandingTildeInPath
         let url: URL
@@ -55,6 +73,18 @@ struct Create: ParsableCommand {
             url = URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent(expandedPath)
         }
         return url.standardizedFileURL.path
+    }
+}
+
+struct CreateDisk: ParsableCommand {
+    @Argument var name: String
+    @Option(name: .long, help: "Disk size in GiB")
+    var sizeGB: UInt64
+
+    mutating func run() throws {
+        let diskStore = try DiskStore()
+        let createdURL = try diskStore.createDisk(named: name, sizeGB: sizeGB)
+        print("Created disk '\(name)' at \(createdURL.path)")
     }
 }
 
