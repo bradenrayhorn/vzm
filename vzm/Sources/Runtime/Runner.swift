@@ -36,27 +36,45 @@ class Runner {
     }
 
     func run() async throws {
-        try await machine.start()
+        let proxyService = try ProxyService(vmName: vmBundle.manifest.name)
 
-        guard machine.socketDevices.count == 1, let virtioDevice = machine.socketDevices.first as? VZVirtioSocketDevice else {
-            throw RunnerError.vsockError(message: "Missing VZVirtioSocketDevice")
-        }
+        do {
+            try await proxyService.launch()
+            try await machine.start()
 
-        let sshListener = try SSHListener(port: vmBundle.manifest.sshPort, virtioDevice: virtioDevice)
-        try await withThrowingTaskGroup(of: Void.self) { group in 
-            group.addTask { @MainActor in
-                try await self.stopDelegate.waitForStop()
+            guard machine.socketDevices.count == 1, let virtioDevice = machine.socketDevices.first as? VZVirtioSocketDevice else {
+                throw RunnerError.vsockError(message: "Missing VZVirtioSocketDevice")
             }
 
-            group.addTask {
-                try await sshListener.start()
-            }
+            try proxyService.attach(to: virtioDevice)
 
-            // wait for first finished task or failed task
-            try await group.next()
-            group.cancelAll()
+            let sshListener = try SSHListener(port: vmBundle.manifest.sshPort, virtioDevice: virtioDevice)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { @MainActor in
+                    try await withTaskCancellationHandler {
+                        try await self.stopDelegate.waitForStop()
+                    } onCancel: {
+                        Task { @MainActor in
+                            self.stopDelegate.cancelWait()
+                        }
+                    }
+                }
+
+                group.addTask {
+                    try await sshListener.start()
+                }
+
+                defer { group.cancelAll() }
+
+                // wait for first finished task or failed task
+                try await group.next()
+            }
+        } catch {
+            await proxyService.stop()
+            throw error
         }
 
+        await proxyService.stop()
     }
 }
 
@@ -127,8 +145,15 @@ class VMStopDelegate: NSObject, VZVirtualMachineDelegate {
     private var stopContinuation: CheckedContinuation<Void, Error>?
 
     func waitForStop() async throws {
-        try await withCheckedThrowingContinuation { continuation in 
+        try await withCheckedThrowingContinuation { continuation in
             self.stopContinuation = continuation
+        }
+    }
+
+    func cancelWait() {
+        if let continuation = stopContinuation {
+            self.stopContinuation = nil
+            continuation.resume(throwing: CancellationError())
         }
     }
 

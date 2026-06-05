@@ -5,11 +5,14 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 BUILD_DIR="$SCRIPT_DIR/.build/arm64-apple-macosx/debug"
 BINARY="$BUILD_DIR/vzm"
+PROXY_BINARY="$SCRIPT_DIR/.build/proxy/vzm-proxy"
 ENTITLEMENTS="$SCRIPT_DIR/vzm.entitlements"
 
 cd "$SCRIPT_DIR"
 
 swift build
+mkdir -p "${PROXY_BINARY:h}"
+(cd "$SCRIPT_DIR/../proxy" && go build -o "$PROXY_BINARY" .)
 codesign -s - -f --entitlements "$ENTITLEMENTS" "$BINARY"
-exec "$BINARY" "$@"
+VZM_PROXY_PATH="$PROXY_BINARY" exec "$BINARY" "$@"
 
