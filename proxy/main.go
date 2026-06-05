@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -44,8 +46,8 @@ type approvalResponse struct {
 
 func askForApproval(requestType, domain, method, path string) bool {
 	if controlUnixPath == "" {
-		log.Printf("auto-approving %s %s %s %s", requestType, method, domain, path)
-		return true
+		log.Printf("approval denied: no control socket configured for %s %s %s %s", requestType, method, domain, path)
+		return false
 	}
 
 	conn, err := net.Dial("unix", controlUnixPath)
@@ -137,22 +139,125 @@ func listen(unixPath, tcpAddr string) (net.Listener, error) {
 }
 
 func handleProxy(w http.ResponseWriter, r *http.Request) {
-	// 1. We ONLY intercept HTTPS CONNECT requests.
 	if r.Method != http.MethodConnect {
-		http.Error(w, "Only HTTPS CONNECT allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Only CONNECT allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	targetDomain := r.Host // e.g., "api.github.com:443"
-	cleanDomain := strings.Split(targetDomain, ":")[0]
+	targetHost, targetPort, err := connectTarget(r)
+	if err != nil {
+		log.Printf("blocked invalid CONNECT target %q: %v", r.Host, err)
+		http.Error(w, "Invalid CONNECT target", http.StatusBadRequest)
+		return
+	}
 
-	// 2. CONNECT Approval Gate
-	if !askForApproval("CONNECT", cleanDomain, r.Method, "") {
+	switch targetPort {
+	case "22":
+		handleSSHTunnel(w, targetHost, targetPort)
+	case "443":
+		handleHTTPSConnect(w, targetHost, targetPort)
+	default:
+		log.Printf("blocked CONNECT to unsupported port %s for %s", targetPort, targetHost)
+		http.Error(w, "CONNECT port not allowed", http.StatusForbidden)
+	}
+}
+
+func connectTarget(r *http.Request) (string, string, error) {
+	target := r.Host
+	if target == "" && r.URL != nil {
+		target = r.URL.Host
+	}
+
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return "", "", err
+	}
+	host = normalizeDomain(host)
+	if host == "" || port == "" {
+		return "", "", fmt.Errorf("invalid host or port")
+	}
+	return host, port, nil
+}
+
+func handleSSHTunnel(w http.ResponseWriter, targetHost, targetPort string) {
+	if !askForApproval("SSH", targetHost, "CONNECT", targetPort) {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
 
-	// 3. Hijack the connection from the standard HTTP server
+	upstreamConn, err := dialPublicTCP(targetHost, targetPort)
+	if err != nil {
+		log.Printf("SSH tunnel dial failed for %s:%s: %v", targetHost, targetPort, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+	defer upstreamConn.Close()
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, clientBuffer, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		return
+	}
+
+	tunnelRawConnections(clientConn, clientBuffer, upstreamConn)
+}
+
+func dialPublicTCP(host, port string) (net.Conn, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if !isAllowedDestinationIP(ip) {
+			return nil, fmt.Errorf("blocked destination address %s", ip.String())
+		}
+		return net.DialTimeout("tcp", net.JoinHostPort(ip.String(), port), 15*time.Second)
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+
+	var lastErr error
+	for _, ip := range ips {
+		if !isAllowedDestinationIP(ip) {
+			log.Printf("blocked destination address %s for %s", ip.String(), host)
+			continue
+		}
+
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), port), 15*time.Second)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no public addresses for %s", host)
+}
+
+func isAllowedDestinationIP(ip net.IP) bool {
+	return ip != nil &&
+		ip.IsGlobalUnicast() &&
+		!ip.IsLoopback() &&
+		!ip.IsPrivate() &&
+		!ip.IsLinkLocalUnicast()
+}
+
+func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
+	if !askForApproval("CONNECT", targetHost, "CONNECT", "") {
+		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
+		return
+	}
+
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
@@ -164,26 +269,22 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clientConn.Close()
 
-	// 4. Tell the VM the tunnel is established
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
-	// 5. Initiate TLS MITM. Force HTTP/1.1 via NextProtos
-	cert, err := generateFakeCertForDomain(cleanDomain)
+	cert, err := generateFakeCertForDomain(targetHost)
 	if err != nil {
 		log.Println("Error generating certificate:", err)
 		return
 	}
-	tlsConfig := &tls.Config{
+	tlsConn := tls.Server(clientConn, &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"http/1.1"}, // STRATEGY: Disable HTTP/2
-	}
-	tlsConn := tls.Server(clientConn, tlsConfig)
+		NextProtos:   []string{"http/1.1"},
+	})
 	if err := tlsConn.Handshake(); err != nil {
-		return // Handshake failed (VM rejected cert or dropped)
+		return
 	}
 	defer tlsConn.Close()
 
-	// 6. Read inner requests in a loop (Keep-Alive)
 	bufReader := bufio.NewReader(tlsConn)
 	for {
 		innerReq, err := http.ReadRequest(bufReader)
@@ -194,24 +295,19 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		// 7. Domain Fronting Check
-		// Ensure the decrypted inner Host header matches the CONNECT tunnel
-		if innerReq.Host != cleanDomain && innerReq.Host != targetDomain {
-			log.Printf("Domain fronting detected! SNI: %s, Host: %s", cleanDomain, innerReq.Host)
-			break // Kill connection
+		if !hostHeaderMatches(innerReq.Host, targetHost, targetPort) {
+			log.Printf("Domain fronting detected! CONNECT: %s, Host: %s", net.JoinHostPort(targetHost, targetPort), innerReq.Host)
+			break
 		}
 
-		// 8. Inner Request Approval Gate
-		if !askForApproval("REQUEST", cleanDomain, innerReq.Method, approvalPath(innerReq)) {
-			// Write a synthetic 403 back to the VM
+		if !askForApproval("REQUEST", targetHost, innerReq.Method, approvalPath(innerReq)) {
 			tlsConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 			break
 		}
 
-		// 9. Execute the approved request to the real internet
 		innerReq.URL.Scheme = "https"
 		innerReq.URL.Host = innerReq.Host
-		innerReq.RequestURI = "" // Must be cleared for client requests
+		innerReq.RequestURI = ""
 		stripHopByHopHeaders(innerReq.Header)
 		innerReq.Close = false
 
@@ -222,14 +318,36 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		// 10. Stream the response back to the VM
-		// Write response headers
 		stripHopByHopHeaders(resp.Header)
 		if err := resp.Write(tlsConn); err != nil {
 			log.Println("Error writing response:", err)
 		}
 		resp.Body.Close()
 	}
+}
+
+func hostHeaderMatches(header, targetHost, targetPort string) bool {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(header))
+	if err == nil {
+		return normalizeDomain(host) == targetHost && port == targetPort
+	}
+
+	// Host headers often omit the default HTTPS port.
+	host = strings.Trim(strings.TrimSpace(header), "[]")
+	return normalizeDomain(host) == targetHost
+}
+
+func tunnelRawConnections(clientConn net.Conn, clientBuffer *bufio.ReadWriter, upstreamConn net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(upstreamConn, clientBuffer)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(clientConn, upstreamConn)
+		done <- struct{}{}
+	}()
+	<-done
 }
 
 func approvalPath(r *http.Request) string {

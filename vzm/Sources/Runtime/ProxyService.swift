@@ -234,8 +234,11 @@ private struct ProxyApprovalResponse: Codable, Sendable {
 private func approveProxyRequest(_ request: ProxyApprovalRequest) async -> Bool {
     // TODO: call the real deny/approve UI. This may suspend indefinitely while
     // the request sits in the UI approval queue.
-    FileHandle.standardError.write(Data("\(request.type) \(request.domain) \n".utf8))
-    
+    let target = request.type == "SSH" && !request.path.isEmpty
+        ? "\(request.domain):\(request.path)"
+        : request.domain
+    FileHandle.standardError.write(Data("\(request.type) \(target)\n".utf8))
+
     return true
 }
 

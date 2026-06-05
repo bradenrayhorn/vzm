@@ -31,10 +31,8 @@
   };
 
   programs.ssh.extraConfig = ''
-    Host github.com
-      HostName github.com
-      Port 22
-      ProxyCommand ${pkgs.socat}/bin/socat - VSOCK-CONNECT:2:2223
+    Host *
+      ProxyCommand ${pkgs.socat}/bin/socat - PROXY:127.0.0.1:%h:%p,proxyport=3128
   '';
 
   security = {
