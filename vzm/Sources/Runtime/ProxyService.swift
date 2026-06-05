@@ -33,10 +33,12 @@ final class ProxyService {
     private let proxyExecutableURL: URL
     private let runDirectoryURL: URL
     private let proxySocketURL: URL
+    private let controlSocketURL: URL
     private let caCertificateURL: URL
     private let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
     private var process: Process?
+    private var controlChannel: Channel?
     private var caPEM: Data?
     private var stopped = false
 
@@ -51,15 +53,19 @@ final class ProxyService {
         self.proxyExecutableURL = try Self.locateProxyExecutable()
         self.runDirectoryURL = try Self.createRunDirectory()
         self.proxySocketURL = runDirectoryURL.appendingPathComponent("p.sock")
+        self.controlSocketURL = runDirectoryURL.appendingPathComponent("control.sock")
         self.caCertificateURL = runDirectoryURL.appendingPathComponent("ca.pem")
     }
 
     func launch() async throws {
+        controlChannel = try await startApprovalControlSocket()
+
         let process = Process()
         process.executableURL = proxyExecutableURL
         process.arguments = [
             "--listen-unix", proxySocketURL.path,
             "--ca-cert", caCertificateURL.path,
+            "--control-unix", controlSocketURL.path,
         ]
         process.currentDirectoryURL = runDirectoryURL
         process.environment = ProcessInfo.processInfo.environment
@@ -114,6 +120,9 @@ final class ProxyService {
             }
         }
 
+        try? await controlChannel?.close().get()
+        controlChannel = nil
+
         try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             eventLoopGroup.shutdownGracefully { error in
                 if let error {
@@ -135,6 +144,17 @@ final class ProxyService {
         proxyListenerDelegate = nil
         caListener = nil
         caListenerDelegate = nil
+    }
+
+    private func startApprovalControlSocket() async throws -> Channel {
+        let channel = try await ServerBootstrap(group: eventLoopGroup)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(ApprovalControlHandler())
+            }
+            .bind(unixDomainSocketPath: controlSocketURL.path, cleanupExistingSocketFile: true)
+            .get()
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: controlSocketURL.path)
+        return channel
     }
 
     private func waitForReady() async throws {
@@ -194,6 +214,92 @@ final class ProxyService {
             attributes: [.posixPermissions: 0o700]
         )
         return url
+    }
+}
+
+private struct ProxyApprovalRequest: Codable, Sendable {
+    let id: String
+    let type: String
+    let domain: String
+    let method: String
+    let path: String
+}
+
+private struct ProxyApprovalResponse: Codable, Sendable {
+    let id: String
+    let approved: Bool
+}
+
+@MainActor
+private func approveProxyRequest(_ request: ProxyApprovalRequest) async -> Bool {
+    // TODO: call the real deny/approve UI. This may suspend indefinitely while
+    // the request sits in the UI approval queue.
+    FileHandle.standardError.write(Data("\(request.type) \(request.domain) \n".utf8))
+    
+    return true
+}
+
+private final class ApprovalControlHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    private var buffer: ByteBuffer?
+    private var handled = false
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !handled else {
+            return
+        }
+
+        var chunk = unwrapInboundIn(data)
+        var buffer = self.buffer ?? context.channel.allocator.buffer(capacity: chunk.readableBytes)
+        buffer.writeBuffer(&chunk)
+
+        guard let newlineIndex = buffer.readableBytesView.firstIndex(of: 10) else {
+            self.buffer = buffer
+            return
+        }
+
+        let length = newlineIndex - buffer.readerIndex
+        guard let line = buffer.readString(length: length) else {
+            context.close(promise: nil)
+            return
+        }
+        _ = buffer.readInteger(as: UInt8.self)
+        self.buffer = buffer
+        handled = true
+
+        guard let requestData = line.data(using: .utf8),
+              let request = try? JSONDecoder().decode(ProxyApprovalRequest.self, from: requestData) else {
+            context.close(promise: nil)
+            return
+        }
+
+        let approvalPromise = context.eventLoop.makePromise(of: Bool.self)
+        approvalPromise.futureResult.whenComplete { result in
+            let approved = (try? result.get()) ?? false
+            let response = ProxyApprovalResponse(id: request.id, approved: approved)
+            guard let responseData = try? JSONEncoder().encode(response) else {
+                context.close(promise: nil)
+                return
+            }
+
+            var output = context.channel.allocator.buffer(capacity: responseData.count + 1)
+            output.writeBytes(responseData)
+            output.writeInteger(UInt8(10))
+            context.writeAndFlush(self.wrapOutboundOut(output)).whenComplete { _ in
+                context.close(promise: nil)
+            }
+        }
+
+        Task {
+            let approved = await approveProxyRequest(request)
+            approvalPromise.succeed(approved)
+        }
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        context.close(promise: nil)
     }
 }
 

@@ -3,16 +3,23 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
-var outboundClient = &http.Client{Transport: newOutboundTransport()}
+var (
+	outboundClient    = &http.Client{Transport: newOutboundTransport()}
+	controlUnixPath   string
+	approvalRequestID uint64
+)
 
 func newOutboundTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -22,19 +29,66 @@ func newOutboundTransport() *http.Transport {
 	return transport
 }
 
-// Represents your IPC link to the Swift UI
-func askForApproval(requestType, domain, path string) bool {
-	// TODO: Send JSON over local socket to Swift, wait for true/false.
-	// e.g., {"type": "CONNECT", "domain": "api.github.com"}
-	// e.g., {"type": "REQUEST", "domain": "api.github.com", "path": "/user"}
-	log.Printf("auto-approving %s %s %s", requestType, domain, path)
-	return true // Stubbed
+type approvalRequest struct {
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	Domain string `json:"domain"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+type approvalResponse struct {
+	ID       string `json:"id"`
+	Approved bool   `json:"approved"`
+}
+
+func askForApproval(requestType, domain, method, path string) bool {
+	if controlUnixPath == "" {
+		log.Printf("auto-approving %s %s %s %s", requestType, method, domain, path)
+		return true
+	}
+
+	conn, err := net.Dial("unix", controlUnixPath)
+	if err != nil {
+		log.Printf("approval denied: connect control socket: %v", err)
+		return false
+	}
+	defer conn.Close()
+
+	request := approvalRequest{
+		ID:     nextApprovalRequestID(),
+		Type:   requestType,
+		Domain: domain,
+		Method: method,
+		Path:   path,
+	}
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		log.Printf("approval denied: write request: %v", err)
+		return false
+	}
+
+	var response approvalResponse
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		log.Printf("approval denied: read response: %v", err)
+		return false
+	}
+	if response.ID != request.ID {
+		log.Printf("approval denied: mismatched response id %q for request %q", response.ID, request.ID)
+		return false
+	}
+
+	return response.Approved
+}
+
+func nextApprovalRequestID() string {
+	return strconv.FormatUint(atomic.AddUint64(&approvalRequestID, 1), 10)
 }
 
 func main() {
 	listenUnixPath := flag.String("listen-unix", "", "Unix domain socket path for the proxy listener")
 	listenTCPAddr := flag.String("listen-tcp", ":26604", "TCP address for the proxy listener when --listen-unix is not set")
 	caCertPath := flag.String("ca-cert", "", "Path to write the MITM CA certificate PEM")
+	flag.StringVar(&controlUnixPath, "control-unix", "", "Unix domain socket path for approval requests")
 	flag.Parse()
 
 	pemPath := *caCertPath
@@ -93,7 +147,7 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	cleanDomain := strings.Split(targetDomain, ":")[0]
 
 	// 2. CONNECT Approval Gate
-	if !askForApproval("CONNECT", cleanDomain, "") {
+	if !askForApproval("CONNECT", cleanDomain, r.Method, "") {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
@@ -148,7 +202,7 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 8. Inner Request Approval Gate
-		if !askForApproval("REQUEST", cleanDomain, innerReq.URL.Path) {
+		if !askForApproval("REQUEST", cleanDomain, innerReq.Method, approvalPath(innerReq)) {
 			// Write a synthetic 403 back to the VM
 			tlsConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 			break
@@ -176,6 +230,16 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Body.Close()
 	}
+}
+
+func approvalPath(r *http.Request) string {
+	if r.URL == nil {
+		return ""
+	}
+	if r.URL.RawQuery == "" {
+		return r.URL.Path
+	}
+	return r.URL.Path + "?" + r.URL.RawQuery
 }
 
 func stripHopByHopHeaders(header http.Header) {
