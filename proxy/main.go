@@ -253,7 +253,7 @@ func isAllowedDestinationIP(ip net.IP) bool {
 }
 
 func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
-	if !askForApproval("CONNECT", targetHost, "CONNECT", "") {
+	if !askForApproval("CONNECT", targetHost, "", "") {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}

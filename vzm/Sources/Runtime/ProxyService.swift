@@ -24,7 +24,6 @@ enum ProxyServiceError: LocalizedError {
     }
 }
 
-@MainActor
 final class ProxyService {
     private static let proxyVsockPort: UInt32 = 3128
     private static let caVsockPort: UInt32 = 3129
@@ -217,7 +216,7 @@ final class ProxyService {
     }
 }
 
-private struct ProxyApprovalRequest: Codable, Sendable {
+struct ProxyApprovalRequest: Codable, Sendable {
     let id: String
     let type: String
     let domain: String
@@ -230,16 +229,8 @@ private struct ProxyApprovalResponse: Codable, Sendable {
     let approved: Bool
 }
 
-@MainActor
 private func approveProxyRequest(_ request: ProxyApprovalRequest) async -> Bool {
-    // TODO: call the real deny/approve UI. This may suspend indefinitely while
-    // the request sits in the UI approval queue.
-    let target = request.type == "SSH" && !request.path.isEmpty
-        ? "\(request.domain):\(request.path)"
-        : request.domain
-    FileHandle.standardError.write(Data("\(request.type) \(target)\n".utf8))
-
-    return true
+    return await ApprovalCoordinator.shared.askForApproval(request: request)
 }
 
 private final class ApprovalControlHandler: ChannelInboundHandler {

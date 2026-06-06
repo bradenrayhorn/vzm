@@ -1,7 +1,6 @@
 import ArgumentParser
 import Foundation
 
-@main
 struct VZM: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage VMs",
