@@ -4,7 +4,7 @@ import Foundation
 struct VZM: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage VMs",
-        subcommands: [Create.self, CreateDisk.self, Run.self, ImportRoot.self, BuildRoot.self]
+        subcommands: [Create.self, CreateDisk.self, Run.self, ImportRoot.self, BuildRoot.self, Secret.self]
     )
 }
 
@@ -110,6 +110,75 @@ struct ImportRoot: ParsableCommand {
         let rootStore = try RootStore()
         let storedURL = try rootStore.storeRoot(named: name, from: path)
         print("Imported root '\(name)' to \(storedURL.path)")
+    }
+}
+
+struct Secret: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Manage secrets stored in the macOS Keychain.",
+        subcommands: [SecretAdd.self, SecretList.self, SecretRemove.self],
+        defaultSubcommand: SecretList.self
+    )
+}
+
+struct SecretAdd: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "add")
+
+    @Argument var name: String
+    @Option(name: .long, help: "Repeatable host/domain restriction.")
+    var host: [String] = []
+
+    mutating func run() throws {
+        let secretData = FileHandle.standardInput.readDataToEndOfFile()
+        guard !secretData.isEmpty else {
+            throw ValidationError("Secret value must be provided on stdin.")
+        }
+
+        let secret = try normalizeSecret(secretData)
+
+        let secretStore = SecretStore()
+        try secretStore.upsertSecret(named: name, secret: secret, hosts: host)
+        print("Stored secret '\(name)'")
+    }
+
+    private func normalizeSecret(_ data: Data) throws -> String {
+        guard let secret = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        else {
+            throw ValidationError("Secret value on stdin must be valid UTF-8.")
+        }
+
+        guard !secret.isEmpty else {
+            throw ValidationError("Secret value must not be empty.")
+        }
+
+        return secret
+    }
+}
+
+struct SecretList: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list")
+
+    mutating func run() throws {
+        let secretStore = SecretStore()
+        let secrets = try secretStore.listSecrets()
+
+        print("NAME\tDOMAINS")
+        for secret in secrets {
+            print("\(secret.name)\t\(secret.hosts.joined(separator: ","))")
+        }
+    }
+}
+
+struct SecretRemove: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "rm")
+
+    @Argument var name: String
+
+    mutating func run() throws {
+        let secretStore = SecretStore()
+        try secretStore.removeSecret(named: name)
+        print("Removed secret '\(name)'")
     }
 }
 
