@@ -68,9 +68,14 @@ class ApprovalCoordinator {
         }
         
         let hostingController = NSHostingController(rootView: promptView)
-        
+        let fittingSize = hostingController.view.fittingSize
+        let panelSize = NSSize(
+            width: min(max(fittingSize.width, 360), 900),
+            height: max(fittingSize.height, 220)
+        )
+
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 150),
+            contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -109,6 +114,21 @@ struct ApprovalPromptView: View {
 
                 Text("\(request.method) \(request.path)")
                     .font(.body)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+
+                if !request.secrets.isEmpty {
+                    VStack(spacing: 4) {
+                        Text("Secrets")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(request.secrets.joined(separator: ", "))
+                            .font(.body)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(.top, 8)
+                }
             }
             
             HStack(spacing: 20) {
@@ -124,6 +144,7 @@ struct ApprovalPromptView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 300)
+        .frame(minWidth: 360, idealWidth: 480, maxWidth: 900)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }

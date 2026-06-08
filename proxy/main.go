@@ -2,15 +2,20 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -31,55 +36,62 @@ func newOutboundTransport() *http.Transport {
 	return transport
 }
 
+var secretPattern = regexp.MustCompile(`\{vzm:([^}]+)\}`)
+
+const maxSecretScanBodySize int64 = 1 << 20
+
 type approvalRequest struct {
-	ID     string `json:"id"`
-	Type   string `json:"type"`
-	Domain string `json:"domain"`
-	Method string `json:"method"`
-	Path   string `json:"path"`
+	ID      string   `json:"id"`
+	Type    string   `json:"type"`
+	Domain  string   `json:"domain"`
+	Method  string   `json:"method"`
+	Path    string   `json:"path"`
+	Secrets []string `json:"secrets"`
 }
 
 type approvalResponse struct {
-	ID       string `json:"id"`
-	Approved bool   `json:"approved"`
+	ID            string            `json:"id"`
+	Approved      bool              `json:"approved"`
+	Substitutions map[string]string `json:"substitutions,omitempty"`
 }
 
-func askForApproval(requestType, domain, method, path string) bool {
+func askForApproval(requestType, domain, method, path string, secrets []string) approvalResponse {
 	if controlUnixPath == "" {
 		log.Printf("approval denied: no control socket configured for %s %s %s %s", requestType, method, domain, path)
-		return false
+		return approvalResponse{Approved: false}
 	}
 
 	conn, err := net.Dial("unix", controlUnixPath)
 	if err != nil {
 		log.Printf("approval denied: connect control socket: %v", err)
-		return false
+		return approvalResponse{Approved: false}
 	}
 	defer conn.Close()
 
 	request := approvalRequest{
-		ID:     nextApprovalRequestID(),
-		Type:   requestType,
-		Domain: domain,
-		Method: method,
-		Path:   path,
+		ID:      nextApprovalRequestID(),
+		Type:    requestType,
+		Domain:  domain,
+		Method:  method,
+		Path:    path,
+		Secrets: secrets,
 	}
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		log.Printf("approval denied: write request: %v", err)
-		return false
+		return approvalResponse{Approved: false}
 	}
 
 	var response approvalResponse
 	if err := json.NewDecoder(conn).Decode(&response); err != nil {
 		log.Printf("approval denied: read response: %v", err)
-		return false
+		return approvalResponse{Approved: false}
 	}
 	if response.ID != request.ID {
 		log.Printf("approval denied: mismatched response id %q for request %q", response.ID, request.ID)
-		return false
+		return approvalResponse{Approved: false}
 	}
 
-	return response.Approved
+	return response
 }
 
 func nextApprovalRequestID() string {
@@ -180,7 +192,7 @@ func connectTarget(r *http.Request) (string, string, error) {
 }
 
 func handleSSHTunnel(w http.ResponseWriter, targetHost, targetPort string) {
-	if !askForApproval("SSH", targetHost, "CONNECT", targetPort) {
+	if !askForApproval("SSH", targetHost, "CONNECT", targetPort, nil).Approved {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
@@ -253,7 +265,7 @@ func isAllowedDestinationIP(ip net.IP) bool {
 }
 
 func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
-	if !askForApproval("CONNECT", targetHost, "", "") {
+	if !askForApproval("CONNECT", targetHost, "", "", nil).Approved {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
@@ -300,8 +312,21 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 			break
 		}
 
-		if !askForApproval("REQUEST", targetHost, innerReq.Method, approvalPath(innerReq)) {
+		secretNames, err := findRequestSecrets(innerReq)
+		if err != nil {
+			log.Println("Error scanning request for secrets:", err)
+			tlsConn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			break
+		}
+
+		approval := askForApproval("REQUEST", targetHost, innerReq.Method, approvalPath(innerReq), secretNames)
+		if !approval.Approved {
 			tlsConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
+			break
+		}
+		if err := applySecretSubstitutions(innerReq, approval.Substitutions); err != nil {
+			log.Println("Error substituting request secrets:", err)
+			tlsConn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 			break
 		}
 
@@ -358,6 +383,172 @@ func approvalPath(r *http.Request) string {
 		return r.URL.Path
 	}
 	return r.URL.Path + "?" + r.URL.RawQuery
+}
+
+func findRequestSecrets(r *http.Request) ([]string, error) {
+	secretSet := map[string]struct{}{}
+
+	collectURLSecretNames(r.URL, secretSet)
+
+	for _, values := range r.Header {
+		for _, value := range values {
+			collectSecretNames(value, secretSet)
+		}
+	}
+
+	body, inspected, err := readInspectableBody(r)
+	if err != nil {
+		return nil, err
+	}
+	if inspected {
+		collectSecretNames(string(body), secretSet)
+	}
+	return sortedSecretNames(secretSet), nil
+}
+
+func collectURLSecretNames(u *url.URL, secretSet map[string]struct{}) {
+	if u == nil {
+		return
+	}
+
+	collectSecretNames(u.Path, secretSet)
+	collectSecretNames(u.RawPath, secretSet)
+	for key, values := range u.Query() {
+		collectSecretNames(key, secretSet)
+		for _, value := range values {
+			collectSecretNames(value, secretSet)
+		}
+	}
+}
+
+func collectSecretNames(text string, secretSet map[string]struct{}) {
+	for _, match := range secretPattern.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(match[1])
+		if name != "" {
+			secretSet[name] = struct{}{}
+		}
+	}
+}
+
+func sortedSecretNames(secretSet map[string]struct{}) []string {
+	return slices.Sorted(maps.Keys(secretSet))
+}
+
+func applySecretSubstitutions(r *http.Request, substitutions map[string]string) error {
+	if len(substitutions) == 0 {
+		return nil
+	}
+
+	applyURLSecretSubstitutions(r.URL, substitutions)
+
+	for key, values := range r.Header {
+		for i, value := range values {
+			values[i] = substituteSecrets(value, substitutions)
+		}
+		r.Header[key] = values
+	}
+
+	body, inspected, err := readInspectableBody(r)
+	if err != nil {
+		return err
+	}
+	if !inspected {
+		return nil
+	}
+
+	rewritten := substituteSecretsBytes(body, substitutions)
+	r.Body = io.NopCloser(bytes.NewReader(rewritten))
+	r.ContentLength = int64(len(rewritten))
+	r.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))
+	r.TransferEncoding = nil
+	return nil
+}
+
+func applyURLSecretSubstitutions(u *url.URL, substitutions map[string]string) {
+	if u == nil {
+		return
+	}
+
+	if rewrittenPath := substituteSecrets(u.Path, substitutions); rewrittenPath != u.Path {
+		u.Path = rewrittenPath
+		u.RawPath = ""
+	} else if rewrittenRawPath := substituteSecrets(u.RawPath, substitutions); rewrittenRawPath != u.RawPath {
+		u.RawPath = rewrittenRawPath
+	}
+
+	query := u.Query()
+	for key, values := range query {
+		newKey := substituteSecrets(key, substitutions)
+		for i, value := range values {
+			values[i] = substituteSecrets(value, substitutions)
+		}
+		if newKey != key {
+			delete(query, key)
+			query[newKey] = values
+		}
+	}
+	u.RawQuery = query.Encode()
+}
+
+func readInspectableBody(r *http.Request) ([]byte, bool, error) {
+	if r.Body == nil {
+		return nil, false, nil
+	}
+	if r.ContentLength < 0 || r.ContentLength > maxSecretScanBodySize || hasExpectContinue(r) {
+		return nil, false, nil
+	}
+
+	originalBody := r.Body
+	body, err := io.ReadAll(io.LimitReader(originalBody, maxSecretScanBodySize+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(body)) > maxSecretScanBodySize {
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{
+			Reader: io.MultiReader(bytes.NewReader(body), originalBody),
+			Closer: originalBody,
+		}
+		return nil, false, nil
+	}
+
+	originalBody.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, true, nil
+}
+
+func substituteSecrets(text string, substitutions map[string]string) string {
+	return string(substituteSecretsBytes([]byte(text), substitutions))
+}
+
+func substituteSecretsBytes(data []byte, substitutions map[string]string) []byte {
+	return secretPattern.ReplaceAllFunc(data, func(match []byte) []byte {
+		parts := secretPattern.FindSubmatch(match)
+		if len(parts) < 2 {
+			return match
+		}
+		name := strings.TrimSpace(string(parts[1]))
+		if value, ok := substitutions[name]; ok {
+			return []byte(value)
+		}
+		return match
+	})
+}
+
+func hasExpectContinue(r *http.Request) bool {
+	for _, value := range r.Header.Values("Expect") {
+		for _, part := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "100-continue") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func stripHopByHopHeaders(header http.Header) {

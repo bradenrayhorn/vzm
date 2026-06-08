@@ -3,9 +3,6 @@
 - Streamline build base process - build and import in one command
 - Reverse-proxy ports running in vm back to host, toggle in menu bar
 
-- Proxy features:
-    - Secret management
-
 - Guest:
     - Docker in guest that has no permissions to everything else
         - Working files should be XX0

@@ -222,15 +222,64 @@ struct ProxyApprovalRequest: Codable, Sendable {
     let domain: String
     let method: String
     let path: String
+    let secrets: [String]
 }
 
 private struct ProxyApprovalResponse: Codable, Sendable {
     let id: String
     let approved: Bool
+    let substitutions: [String: String]
 }
 
-private func approveProxyRequest(_ request: ProxyApprovalRequest) async -> Bool {
-    return await ApprovalService.shared.askForApproval(request: request)
+private func proxyApprovalResponse(for request: ProxyApprovalRequest) async -> ProxyApprovalResponse {
+    guard await ApprovalService.shared.askForApproval(request: request) else {
+        return ProxyApprovalResponse(id: request.id, approved: false, substitutions: [:])
+    }
+
+    do {
+        let substitutions = try resolveSecretSubstitutions(for: request)
+        return ProxyApprovalResponse(id: request.id, approved: true, substitutions: substitutions)
+    } catch {
+        FileHandle.standardError.write(Data("Denied proxy request because secrets could not be resolved: \(error)\n".utf8))
+        return ProxyApprovalResponse(id: request.id, approved: false, substitutions: [:])
+    }
+}
+
+private enum ProxySecretResolutionError: LocalizedError {
+    case unauthorized(String, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthorized(let name, let domain):
+            return "Secret '\(name)' is not authorized for host: \(domain)"
+        }
+    }
+}
+
+private func resolveSecretSubstitutions(for request: ProxyApprovalRequest) throws -> [String: String] {
+    guard !request.secrets.isEmpty else {
+        return [:]
+    }
+
+    let secretStore = SecretStore()
+    let normalizedDomain = request.domain
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+        .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+
+    let metadataByName = try Dictionary(uniqueKeysWithValues: secretStore.listSecrets().map { ($0.name, $0) })
+
+    var substitutions: [String: String] = [:]
+    for name in Set(request.secrets) {
+        guard let metadata = metadataByName[name] else {
+            throw SecretStore.Error.secretNotFound(name)
+        }
+        guard metadata.hosts.isEmpty || metadata.hosts.contains(normalizedDomain) else {
+            throw ProxySecretResolutionError.unauthorized(name, normalizedDomain)
+        }
+        substitutions[name] = try secretStore.readSecret(named: name)
+    }
+    return substitutions
 }
 
 private final class ApprovalControlHandler: ChannelInboundHandler {
@@ -269,10 +318,9 @@ private final class ApprovalControlHandler: ChannelInboundHandler {
             return
         }
 
-        let approvalPromise = context.eventLoop.makePromise(of: Bool.self)
+        let approvalPromise = context.eventLoop.makePromise(of: ProxyApprovalResponse.self)
         approvalPromise.futureResult.whenComplete { result in
-            let approved = (try? result.get()) ?? false
-            let response = ProxyApprovalResponse(id: request.id, approved: approved)
+            let response = (try? result.get()) ?? ProxyApprovalResponse(id: request.id, approved: false, substitutions: [:])
             guard let responseData = try? JSONEncoder().encode(response) else {
                 context.close(promise: nil)
                 return
@@ -287,8 +335,8 @@ private final class ApprovalControlHandler: ChannelInboundHandler {
         }
 
         Task {
-            let approved = await approveProxyRequest(request)
-            approvalPromise.succeed(approved)
+            let response = await proxyApprovalResponse(for: request)
+            approvalPromise.succeed(response)
         }
     }
 
