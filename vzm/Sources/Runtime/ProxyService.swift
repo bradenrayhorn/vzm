@@ -230,7 +230,7 @@ private struct ProxyApprovalResponse: Codable, Sendable {
 }
 
 private func approveProxyRequest(_ request: ProxyApprovalRequest) async -> Bool {
-    return await ApprovalCoordinator.shared.askForApproval(request: request)
+    return await ApprovalService.shared.askForApproval(request: request)
 }
 
 private final class ApprovalControlHandler: ChannelInboundHandler {
