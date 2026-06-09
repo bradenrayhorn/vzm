@@ -78,6 +78,9 @@ struct RootStore {
         }
 
         let destinationURL = rootsDirectoryURL.appendingPathComponent(name, isDirectory: true)
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
         try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
 
         do {
