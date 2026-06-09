@@ -60,7 +60,7 @@ jobs:
           retention-days: 7
 
   build-vzm:
-    runs-on: macos-14
+    runs-on: macos-26
     needs: version
     steps:
       - name: Checkout repository
@@ -115,7 +115,7 @@ jobs:
           retention-days: 7
 
   package-release:
-    runs-on: macos-14
+    runs-on: macos-26
     needs:
       - version
       - build-guest
