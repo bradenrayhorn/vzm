@@ -1,6 +1,5 @@
 - Edit new guests from within a guest?
     - Really just shared drive mounting, then have a vm created for guest editing with a shared path
-- configure cpu/memory
 
 - bundling: can bundle proxy and builder into swift package somehow? Then build-root can remove builder param.
 

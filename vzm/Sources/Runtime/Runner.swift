@@ -5,6 +5,11 @@ enum RunnerError : Error {
     case vsockError(message: String)
 }
 
+struct VMResources {
+    let cpuCount: Int
+    let memorySizeBytes: UInt64
+}
+
 @MainActor
 class Runner {
 
@@ -15,7 +20,7 @@ class Runner {
     let machine: VZVirtualMachine
     let stopDelegate: VMStopDelegate
 
-    init(vmBundle: StoredVM, rootBundle: RootBundle) throws {
+    init(vmBundle: StoredVM, rootBundle: RootBundle, resources: VMResources = .default) throws {
         self.vmBundle = vmBundle
         self.rootBundle = rootBundle
 
@@ -23,7 +28,7 @@ class Runner {
         self.diskBundles = try vmBundle.manifest.disks.map { try diskStore.loadDisk(named: $0.name) }
         self.diskLease = try diskStore.acquireLease(for: diskBundles)
 
-        let configuration = try VZConfiguration().build(vmBundle: vmBundle, rootBundle: rootBundle, diskBundles: diskBundles)
+        let configuration = try VZConfiguration().build(vmBundle: vmBundle, rootBundle: rootBundle, diskBundles: diskBundles, resources: resources)
         machine = VZVirtualMachine(configuration: configuration)
 
         stopDelegate = VMStopDelegate()
@@ -89,8 +94,19 @@ class Runner {
     }
 }
 
+extension VMResources {
+    static let gibibyte: UInt64 = 1024 * 1024 * 1024
+    static let `default` = VMResources(
+        cpuCount: VZConfiguration.defaultCPUCount,
+        memorySizeBytes: VZConfiguration.defaultMemorySizeBytes
+    )
+}
+
 struct VZConfiguration {
-    func build(vmBundle: StoredVM, rootBundle: RootBundle, diskBundles: [DiskBundle]) throws -> VZVirtualMachineConfiguration {
+    static let defaultCPUCount = 4
+    static let defaultMemorySizeBytes: UInt64 = 8 * VMResources.gibibyte
+
+    func build(vmBundle: StoredVM, rootBundle: RootBundle, diskBundles: [DiskBundle], resources: VMResources) throws -> VZVirtualMachineConfiguration {
         let configuration = VZVirtualMachineConfiguration()
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
@@ -122,8 +138,8 @@ struct VZConfiguration {
             storageDevices.append(blockDevice)
         }
         configuration.storageDevices = storageDevices
-        configuration.cpuCount = 4
-        configuration.memorySize = 8 * 1024 * 1024 * 1024
+        configuration.cpuCount = resources.cpuCount
+        configuration.memorySize = resources.memorySizeBytes
         configuration.networkDevices = []
         configuration.directorySharingDevices = vmBundle.manifest.shares.map { share in
             let sharedDirectory = VZSharedDirectory(url: URL(fileURLWithPath: share.hostPath), readOnly: false)

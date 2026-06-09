@@ -89,15 +89,31 @@ struct CreateDisk: ParsableCommand {
 
 struct Run: AsyncParsableCommand {
     @Argument var name: String
+    @Option(name: .long, help: "Number of virtual CPUs. Defaults to the current value (\(VZConfiguration.defaultCPUCount)).")
+    var cpuCount: Int = VZConfiguration.defaultCPUCount
+    @Option(name: .long, help: "Memory size in GiB. Defaults to the current value (\(VZConfiguration.defaultMemorySizeBytes / VMResources.gibibyte)).")
+    var memoryGB: UInt64 = VZConfiguration.defaultMemorySizeBytes / VMResources.gibibyte
 
     mutating func run() async throws {
+        guard cpuCount > 0 else {
+            throw ValidationError("Invalid --cpu-count: must be greater than 0")
+        }
+
+        guard memoryGB > 0 else {
+            throw ValidationError("Invalid --memory-gb: must be greater than 0")
+        }
+
         let vmStore = try VMStore()
         let vm = try vmStore.loadVM(named: name)
 
         let rootStore = try RootStore()
         let root = try rootStore.loadRoot(named: vm.manifest.root)
 
-        let runner = try await Runner(vmBundle: vm, rootBundle: root)
+        let resources = VMResources(
+            cpuCount: cpuCount,
+            memorySizeBytes: memoryGB * VMResources.gibibyte
+        )
+        let runner = try await Runner(vmBundle: vm, rootBundle: root, resources: resources)
         try await runner.run()
     }
 }
