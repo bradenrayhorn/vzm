@@ -75,6 +75,7 @@ jobs:
         run: |
           mkdir -p dist
           cp vzm/.build/release/vzm dist/vzm
+          chmod +x dist/vzm
 
       - name: Upload vzm artifact
         uses: actions/upload-artifact@v4
@@ -151,6 +152,16 @@ jobs:
           mkdir -p "$ROOT"
           cp artifacts/vzm/vzm "$ROOT/vzm"
           cp artifacts/proxy/vzm-proxy "$ROOT/vzm-proxy"
+          chmod +x "$ROOT/vzm" "$ROOT/vzm-proxy"
+          cat > "$ROOT/unquarantine-macos.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          xattr -dr com.apple.quarantine "$BUNDLE_DIR"
+          echo "Removed com.apple.quarantine from $BUNDLE_DIR"
+          EOF
+          chmod +x "$ROOT/unquarantine-macos.sh"
           mkdir -p "$ROOT/builder-guest"
           cp -R artifacts/guest/builder-guest/result "$ROOT/builder-guest/result"
 

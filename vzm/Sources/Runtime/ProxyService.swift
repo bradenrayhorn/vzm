@@ -15,7 +15,7 @@ enum ProxyServiceError: LocalizedError {
         case .proxyExecutableNotFound(let path):
             return "Proxy executable does not exist or is not executable: \(path)"
         case .proxyExecutableMissing:
-            return "Proxy executable not found. Set VZM_PROXY_PATH or run through vzm/run-signed."
+            return "Proxy executable not found. Set VZM_PROXY_PATH or keep vzm-proxy next to the vzm binary."
         case .proxyNotReady(let message):
             return "Proxy did not become ready: \(message)"
         case .missingCertificateAuthority:
@@ -183,16 +183,15 @@ final class ProxyService {
             return url
         }
 
-        let argumentZero = CommandLine.arguments.first ?? "vzm"
-        let executableURL = argumentZero.hasPrefix("/")
-            ? URL(fileURLWithPath: argumentZero)
-            : URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent(argumentZero)
-        let executableDirectoryURL = executableURL.resolvingSymlinksInPath().deletingLastPathComponent()
-        let currentDirectoryURL = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
+        if let bundledProxyURL = ExecutableLocator.findExecutableNextToCurrentExecutable(
+            named: ["vzm-proxy", "proxy"],
+            fileManager: fileManager
+        ) {
+            return bundledProxyURL
+        }
 
+        let currentDirectoryURL = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
         for candidate in [
-            executableDirectoryURL.appendingPathComponent("vzm-proxy"),
-            executableDirectoryURL.appendingPathComponent("proxy"),
             currentDirectoryURL.appendingPathComponent(".build/proxy/vzm-proxy"),
             currentDirectoryURL.appendingPathComponent("../proxy/proxy"),
         ] {

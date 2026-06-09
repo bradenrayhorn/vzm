@@ -417,10 +417,12 @@ enum GuestBuilderPaths {
             return url(from: path, fileManager: fileManager)
         }
 
-        let executableURL = URL(fileURLWithPath: CommandLine.arguments.first ?? "vzm")
-            .standardizedFileURL
-        return executableURL
-            .deletingLastPathComponent()
+        let executableDirectoryURL = ExecutableLocator.currentExecutableDirectoryURL()
+            ?? URL(fileURLWithPath: CommandLine.arguments.first ?? "vzm")
+                .standardizedFileURL
+                .deletingLastPathComponent()
+
+        return executableDirectoryURL
             .appendingPathComponent("builder-guest", isDirectory: true)
             .appendingPathComponent("result", isDirectory: true)
             .standardizedFileURL
