@@ -1,3 +1,5 @@
+import Darwin
+import Dispatch
 import Foundation
 import Virtualization
 
@@ -19,6 +21,8 @@ class Runner {
     let diskLease: DiskLease
     let machine: VZVirtualMachine
     let stopDelegate: VMStopDelegate
+
+    private var interruptCount = 0
 
     init(vmBundle: StoredVM, rootBundle: RootBundle, resources: VMResources = .default) throws {
         self.vmBundle = vmBundle
@@ -42,6 +46,21 @@ class Runner {
         do {
             try await proxyService.launch()
             try await machine.start()
+
+            Darwin.signal(SIGINT, SIG_IGN)
+            let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+            interruptSource.setEventHandler { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.interruptCount += 1
+                    await self.stopFromInterrupt(force: self.interruptCount > 1)
+                }
+            }
+            interruptSource.setCancelHandler {
+                Darwin.signal(SIGINT, SIG_DFL)
+            }
+            interruptSource.resume()
+            defer { interruptSource.cancel() }
 
             guard machine.socketDevices.count == 1, let virtioDevice = machine.socketDevices.first as? VZVirtioSocketDevice else {
                 throw RunnerError.vsockError(message: "Missing VZVirtioSocketDevice")
@@ -91,6 +110,53 @@ class Runner {
         PortExposureCoordinator.shared.detach()
         await portExposureService?.stop()
         await proxyService.stop()
+    }
+
+    private func stopFromInterrupt(force: Bool) async {
+        if force {
+            fputs("Received Ctrl-C again; forcing VM stop.\n", stderr)
+            await forceStop()
+            return
+        }
+
+        fputs("Received Ctrl-C; requesting VM shutdown. Press Ctrl-C again to force stop.\n", stderr)
+
+        if machine.canRequestStop {
+            do {
+                try machine.requestStop()
+                return
+            } catch {
+                fputs("Graceful VM shutdown failed: \(error). Forcing stop.\n", stderr)
+            }
+        }
+
+        await forceStop()
+    }
+
+    private func forceStop() async {
+        guard machine.canStop else {
+            fputs("VM cannot be stopped right now.\n", stderr)
+            return
+        }
+
+        do {
+            try await stopImmediately()
+            stopDelegate.hostDidStop()
+        } catch {
+            stopDelegate.hostStopFailed(error)
+        }
+    }
+
+    private func stopImmediately() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            machine.stop { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
     }
 }
 
@@ -184,17 +250,28 @@ class VMStopDelegate: NSObject, VZVirtualMachineDelegate {
         }
     }
 
+    func hostDidStop() {
+        finish(.success(()))
+    }
+
+    func hostStopFailed(_ error: any Error) {
+        finish(.failure(error))
+    }
+
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-        if let continuation = stopContinuation {
-            self.stopContinuation = nil
-            continuation.resume(returning: ())
-        }
+        finish(.success(()))
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
-        if let continuation = stopContinuation {
-            self.stopContinuation = nil
-            continuation.resume(throwing: error)
+        finish(.failure(error))
+    }
+
+    private func finish(_ result: Result<Void, Error>) {
+        guard let continuation = stopContinuation else {
+            return
         }
+
+        stopContinuation = nil
+        continuation.resume(with: result)
     }
 }

@@ -14,6 +14,7 @@ struct VZMMenuBarApp: App {
             Task { @MainActor in
                 do {
                     try await command.run()
+                    exit(EXIT_SUCCESS)
                 } catch {
                     print("Background task failed: \(error)")
                     exit(1)

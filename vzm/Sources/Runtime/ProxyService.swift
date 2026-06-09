@@ -77,6 +77,7 @@ final class ProxyService {
         try await waitForReady()
     }
 
+    @MainActor
     func attach(to virtioDevice: VZVirtioSocketDevice) throws {
         guard let caPEM else {
             throw ProxyServiceError.missingCertificateAuthority
@@ -110,7 +111,7 @@ final class ProxyService {
         }
         stopped = true
 
-        detach()
+        await detach()
 
         if let process, process.isRunning {
             process.terminate()
@@ -136,6 +137,7 @@ final class ProxyService {
         try? FileManager.default.removeItem(at: runDirectoryURL)
     }
 
+    @MainActor
     private func detach() {
         virtioDevice?.removeSocketListener(forPort: Self.proxyVsockPort)
         virtioDevice?.removeSocketListener(forPort: Self.caVsockPort)
