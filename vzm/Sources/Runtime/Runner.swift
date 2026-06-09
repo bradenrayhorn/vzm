@@ -5,11 +5,6 @@ enum RunnerError : Error {
     case vsockError(message: String)
 }
 
-protocol VZMService: Sendable {
-    func start() async throws
-    func stop() async
-}
-
 @MainActor
 class Runner {
 
@@ -37,6 +32,7 @@ class Runner {
 
     func run() async throws {
         let proxyService = try ProxyService(vmName: vmBundle.manifest.name)
+        var portExposureService: PortExposureService?
 
         do {
             try await proxyService.launch()
@@ -48,7 +44,16 @@ class Runner {
 
             try proxyService.attach(to: virtioDevice)
 
-            let sshListener = try SSHListener(port: vmBundle.manifest.sshPort, virtioDevice: virtioDevice)
+            let exposureService = PortExposureService(virtioDevice: virtioDevice)
+            portExposureService = exposureService
+            PortExposureCoordinator.shared.attach(service: exposureService)
+
+            let sshListener = TCPVirtioForwardListener(
+                hostPort: vmBundle.manifest.sshPort,
+                target: .directVsock(port: 22),
+                virtioDevice: virtioDevice,
+                label: "SSH forwarding"
+            )
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask { @MainActor in
                     try await withTaskCancellationHandler {
@@ -70,10 +75,16 @@ class Runner {
                 try await group.next()
             }
         } catch {
-            await proxyService.stop()
+            await stopRuntimeServices(portExposureService: portExposureService, proxyService: proxyService)
             throw error
         }
 
+        await stopRuntimeServices(portExposureService: portExposureService, proxyService: proxyService)
+    }
+
+    private func stopRuntimeServices(portExposureService: PortExposureService?, proxyService: ProxyService) async {
+        PortExposureCoordinator.shared.detach()
+        await portExposureService?.stop()
         await proxyService.stop()
     }
 }

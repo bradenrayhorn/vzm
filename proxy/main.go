@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -59,6 +60,10 @@ func askForApproval(requestType, domain, method, path string, secrets []string) 
 	if controlUnixPath == "" {
 		log.Printf("approval denied: no control socket configured for %s %s %s %s", requestType, method, domain, path)
 		return approvalResponse{Approved: false}
+	}
+
+	if secrets == nil {
+		secrets = []string{}
 	}
 
 	conn, err := net.Dial("unix", controlUnixPath)
@@ -102,8 +107,13 @@ func main() {
 	listenUnixPath := flag.String("listen-unix", "", "Unix domain socket path for the proxy listener")
 	listenTCPAddr := flag.String("listen-tcp", ":26604", "TCP address for the proxy listener when --listen-unix is not set")
 	caCertPath := flag.String("ca-cert", "", "Path to write the MITM CA certificate PEM")
+	parentPID := flag.Int("parent-pid", 0, "PID of the parent vzm process; exit if it disappears")
 	flag.StringVar(&controlUnixPath, "control-unix", "", "Unix domain socket path for approval requests")
 	flag.Parse()
+
+	if *parentPID > 0 {
+		go exitWhenParentDisappears(*parentPID)
+	}
 
 	pemPath := *caCertPath
 	if pemPath == "" {
@@ -148,6 +158,20 @@ func listen(unixPath, tcpAddr string) (net.Listener, error) {
 		return nil, err
 	}
 	return listener, nil
+}
+
+func exitWhenParentDisappears(parentPID int) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if os.Getppid() != parentPID {
+			os.Exit(0)
+		}
+		if err := syscall.Kill(parentPID, 0); err != nil {
+			os.Exit(0)
+		}
+	}
 }
 
 func handleProxy(w http.ResponseWriter, r *http.Request) {

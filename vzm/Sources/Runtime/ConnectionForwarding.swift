@@ -46,3 +46,33 @@ final class ForwardingHandler: ChannelInboundHandler {
         peer?.close(promise: nil)
     }
 }
+
+func bridge(_ first: Channel, _ second: Channel, initialBytesToSecond initialBytes: [UInt8] = []) -> EventLoopFuture<Void> {
+    first.pipeline.addHandler(ForwardingHandler(peer: second)).and(
+        second.pipeline.addHandler(ForwardingHandler(peer: first))
+    ).flatMap { _ in
+        writeInitialBytes(initialBytes, to: second)
+    }.flatMap { _ in
+        first.setOption(ChannelOptions.autoRead, value: true).and(
+            second.setOption(ChannelOptions.autoRead, value: true)
+        )
+    }.flatMap { _ in
+        first.read()
+        second.read()
+        return first.closeFuture.and(second.closeFuture).map { _ in () }
+    }.flatMapError { error in
+        first.close(promise: nil)
+        second.close(promise: nil)
+        return first.eventLoop.makeFailedFuture(error)
+    }
+}
+
+private func writeInitialBytes(_ bytes: [UInt8], to channel: Channel) -> EventLoopFuture<Void> {
+    guard !bytes.isEmpty else {
+        return channel.eventLoop.makeSucceededVoidFuture()
+    }
+
+    var buffer = channel.allocator.buffer(capacity: bytes.count)
+    buffer.writeBytes(bytes)
+    return channel.writeAndFlush(buffer)
+}

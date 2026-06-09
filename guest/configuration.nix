@@ -9,6 +9,7 @@
   imports = [
     (modulesPath + "/profiles/qemu-guest.nix")
     ./proxy.nix
+    ./port-expose.nix
   ];
 
   nix.settings.experimental-features = [

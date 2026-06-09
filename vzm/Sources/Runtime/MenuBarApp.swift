@@ -1,5 +1,6 @@
 import SwiftUI
 import ArgumentParser
+import AppKit
 
 class MenuBarAppEnvironment {
     static let shared = MenuBarAppEnvironment()
@@ -21,13 +22,71 @@ struct VZMMenuBarApp: App {
         }
     }
 
-    @State private var coordinator = ApprovalCoordinator.shared
+    @State private var portExposureCoordinator = PortExposureCoordinator.shared
 
     var body: some Scene {
         MenuBarExtra("vm") {
             VStack {
                 Text("VM Running...")
                 Divider()
+                PortExposureMenuView(coordinator: portExposureCoordinator)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+}
+
+@Observable
+@MainActor
+class PortExposureCoordinator {
+    static let shared = PortExposureCoordinator()
+
+    private(set) var service: PortExposureService?
+
+    func attach(service: PortExposureService) {
+        self.service = service
+    }
+
+    func detach() {
+        service = nil
+    }
+}
+
+struct PortExposureMenuView: View {
+    @Bindable var coordinator: PortExposureCoordinator
+
+    let availablePorts: [UInt16] = [3000, 5173, 7835, 8000, 8080]
+
+    var body: some View {
+        Section("Port forwarding") {
+            if let service = coordinator.service {
+                PortExposureControls(service: service, availablePorts: availablePorts)
+            } else {
+                Text("VM is not ready")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(minWidth: 280, alignment: .leading)
+    }
+}
+
+struct PortExposureControls: View {
+    @Bindable var service: PortExposureService
+    let availablePorts: [UInt16]
+
+    var body: some View {
+        ForEach(availablePorts, id: \.self) { port in
+            Toggle(isOn: Binding(
+                get: { service.isExposed(port: port) },
+                set: { isStarting in
+                    if isStarting {
+                        service.expose(port: port)
+                    } else {
+                        service.unexpose(port: port)
+                    }
+                }
+            )) {
+                Text(":\(port, format: .number.grouping(.never))")
             }
         }
     }

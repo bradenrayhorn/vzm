@@ -65,6 +65,7 @@ final class ProxyService {
             "--listen-unix", proxySocketURL.path,
             "--ca-cert", caCertificateURL.path,
             "--control-unix", controlSocketURL.path,
+            "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
         ]
         process.currentDirectoryURL = runDirectoryURL
         process.environment = ProcessInfo.processInfo.environment
@@ -401,23 +402,5 @@ private final class VsockUnixBridgeDelegate: NSObject, VZVirtioSocketListenerDel
             }
 
         return true
-    }
-}
-
-private func bridge(_ first: Channel, _ second: Channel) -> EventLoopFuture<Void> {
-    first.pipeline.addHandler(ForwardingHandler(peer: second)).and(
-        second.pipeline.addHandler(ForwardingHandler(peer: first))
-    ).flatMap { _ in
-        first.setOption(ChannelOptions.autoRead, value: true).and(
-            second.setOption(ChannelOptions.autoRead, value: true)
-        )
-    }.flatMap { _ in
-        first.read()
-        second.read()
-        return first.closeFuture.and(second.closeFuture).map { _ in () }
-    }.flatMapError { error in
-        first.close(promise: nil)
-        second.close(promise: nil)
-        return first.eventLoop.makeFailedFuture(error)
     }
 }
