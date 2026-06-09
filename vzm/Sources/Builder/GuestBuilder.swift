@@ -10,13 +10,11 @@ enum GuestBuilderLog {
 struct GuestBuilderOptions {
     let builderRootURL: URL
     let sourceURL: URL
-    let outputURL: URL
-    let attribute: String
-    let workDiskSizeBytes: UInt64
-    let cpuCount: Int
-    let memorySizeBytes: UInt64
-    let keepWorkspace: Bool
-    let workspaceURL: URL?
+
+    let attribute: String = "guest-bundle"
+    let workDiskSizeBytes: UInt64 = 64 * 1024 * 1024 * 1024
+    let cpuCount: Int = 4
+    let memorySizeBytes: UInt64 = 8 * 1024 * 1024 * 1024
 }
 
 struct GuestBuilderStatus: Codable {
@@ -114,13 +112,7 @@ final class GuestBuilder {
         }
 
         try validateBundle(at: workspace.outputURL)
-        try copyBundle(from: workspace.outputURL, to: options.outputURL)
-
-        if workspace.shouldRemoveOnSuccess {
-            try? fileManager.removeItem(at: workspace.directoryURL)
-        }
-
-        return options.outputURL
+        return workspace.outputURL
     }
 
     private func validateOptions() throws {
@@ -167,22 +159,12 @@ final class GuestBuilder {
     }
 
     private func prepareWorkspace() throws -> GuestBuilderWorkspace {
-        let workspaceURL: URL
-        let shouldRemoveOnSuccess: Bool
+        let workspaceURL = fileManager.temporaryDirectory
+            .appendingPathComponent("vzm-build-root-\(UUID().uuidString)", isDirectory: true)
+            .standardizedFileURL
+        try fileManager.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
 
-        if let requestedWorkspaceURL = options.workspaceURL {
-            workspaceURL = requestedWorkspaceURL.standardizedFileURL
-            shouldRemoveOnSuccess = false
-            try fileManager.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
-        } else {
-            workspaceURL = fileManager.temporaryDirectory
-                .appendingPathComponent("vzm-build-root-\(UUID().uuidString)", isDirectory: true)
-                .standardizedFileURL
-            shouldRemoveOnSuccess = !options.keepWorkspace
-            try fileManager.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
-        }
-
-        let workspace = GuestBuilderWorkspace(directoryURL: workspaceURL, shouldRemoveOnSuccess: shouldRemoveOnSuccess)
+        let workspace = GuestBuilderWorkspace(directoryURL: workspaceURL)
         try cleanWorkspace(workspace)
         try fileManager.createDirectory(at: workspace.outputURL, withIntermediateDirectories: true)
         return workspace
@@ -248,7 +230,45 @@ final class GuestBuilder {
         machine.delegate = stopDelegate
 
         try await machine.start()
-        try await stopDelegate.waitForStop()
+
+        let statusURL = workspaceURL.appendingPathComponent("status.json")
+        do {
+            try await waitForBuilderCompletion(statusURL: statusURL, stopDelegate: stopDelegate)
+        } catch {
+            try? await forceStop(machine)
+            throw error
+        }
+
+        if fileManager.fileExists(atPath: statusURL.path) {
+            try? await forceStop(machine)
+        }
+    }
+
+    private func waitForBuilderCompletion(statusURL: URL, stopDelegate: GuestBuilderStopDelegate) async throws {
+        while !fileManager.fileExists(atPath: statusURL.path) {
+            if let stopResult = stopDelegate.stopResult {
+                try stopResult.get()
+                return
+            }
+
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+    }
+
+    private func forceStop(_ machine: VZVirtualMachine) async throws {
+        guard machine.canStop else {
+            return
+        }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            machine.stop { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
     }
 
     private func buildVirtualMachineConfiguration(builderRoot: BuilderRootBundle, workspaceURL: URL, workDiskURL: URL) throws -> VZVirtualMachineConfiguration {
@@ -326,32 +346,6 @@ final class GuestBuilder {
         }
     }
 
-    private func copyBundle(from sourceURL: URL, to destinationURL: URL) throws {
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: destinationURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                throw GuestBuilderError.invalidDirectory(destinationURL.path)
-            }
-        } else {
-            try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
-        }
-
-        for file in Self.bundleFiles {
-            let sourceFileURL = sourceURL.appendingPathComponent(file)
-            let destinationFileURL = destinationURL.appendingPathComponent(file)
-            let temporaryDestinationURL = destinationURL.appendingPathComponent(".\(file).tmp-\(UUID().uuidString)")
-
-            if fileManager.fileExists(atPath: temporaryDestinationURL.path) {
-                try fileManager.removeItem(at: temporaryDestinationURL)
-            }
-            try fileManager.copyItem(at: sourceFileURL, to: temporaryDestinationURL)
-            if fileManager.fileExists(atPath: destinationFileURL.path) {
-                try fileManager.removeItem(at: destinationFileURL)
-            }
-            try fileManager.moveItem(at: temporaryDestinationURL, to: destinationFileURL)
-        }
-    }
-
     private func requireDirectory(_ url: URL) throws {
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
@@ -362,7 +356,6 @@ final class GuestBuilder {
 
 struct GuestBuilderWorkspace {
     let directoryURL: URL
-    let shouldRemoveOnSuccess: Bool
 
     var sourceURL: URL { directoryURL.appendingPathComponent("source", isDirectory: true) }
     var outputURL: URL { directoryURL.appendingPathComponent("output", isDirectory: true) }
@@ -376,7 +369,7 @@ struct GuestBuilderWorkspace {
 
 final class GuestBuilderStopDelegate: NSObject, VZVirtualMachineDelegate {
     private var stopContinuation: CheckedContinuation<Void, Error>?
-    private var stopResult: Result<Void, Error>?
+    private(set) var stopResult: Result<Void, Error>?
 
     func waitForStop() async throws {
         if let stopResult {

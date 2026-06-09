@@ -63,7 +63,7 @@ Then it writes `status.json` and powers off.
    - read/write work block device
    - `VZVirtioFileSystemDeviceConfiguration(tag: "vzm-builder")`
    - `VZVirtioNetworkDeviceConfiguration` using `VZNATNetworkDeviceAttachment`
-7. Waits for VM shutdown, reads `status.json`, and fails if missing or non-zero.
+7. Waits for `status.json` to appear, destructively stops the builder VM from the host, then reads `status.json` and fails if missing or non-zero.
 8. Copies `output/` to the requested destination.
 9. Leaves importing into `RootStore` as a separate step.
 

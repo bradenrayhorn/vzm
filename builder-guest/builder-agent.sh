@@ -32,6 +32,9 @@ write_status() {
 
 finish() {
   local exit_code=$?
+  # The host treats status.json as the completion marker and may stop the VM
+  # immediately after it appears. Flush copied outputs before publishing status.
+  sync || true
   write_status "$exit_code"
   exit "$exit_code"
 }

@@ -21,7 +21,7 @@ The Swift host is implemented as:
 
 ```sh
 cd ../vzm
-./run-signed build-root ../guest --output /tmp/guest-bundle
+./run-signed build-root ../guest my-root
 ```
 
 At runtime `vzm build-root` attaches:

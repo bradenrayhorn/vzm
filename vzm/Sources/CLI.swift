@@ -4,7 +4,7 @@ import Foundation
 struct VZM: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage VMs",
-        subcommands: [Create.self, CreateDisk.self, Run.self, ImportRoot.self, BuildRoot.self, Secret.self]
+        subcommands: [Create.self, CreateDisk.self, Run.self, BuildRoot.self, Secret.self]
     )
 }
 
@@ -102,17 +102,6 @@ struct Run: AsyncParsableCommand {
     }
 }
 
-struct ImportRoot: ParsableCommand {
-    @Argument var name: String
-    @Option var path: String
-
-    mutating func run() throws {
-        let rootStore = try RootStore()
-        let storedURL = try rootStore.storeRoot(named: name, from: path)
-        print("Imported root '\(name)' to \(storedURL.path)")
-    }
-}
-
 struct Secret: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage secrets stored in the macOS Keychain.",
@@ -184,61 +173,36 @@ struct SecretRemove: ParsableCommand {
 
 struct BuildRoot: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Build a Linux guest root bundle using the separate builder guest VM."
+        abstract: "Build and import a Linux guest root bundle using the separate builder guest VM."
     )
 
-    @Argument(help: "Guest flake/source directory to build. Defaults to ../guest.")
-    var source: String?
+    @Argument(help: "Guest flake/source directory to build.")
+    var source: String
 
-    @Option(name: .long, help: "Directory to write the built root bundle into.")
-    var output: String
+    @Argument(help: "Name to import the built root as.")
+    var name: String
 
     @Option(name: .long, help: "Path to the already-built builder guest bundle. Defaults to the nearest builder-guest/result found above the current directory.")
     var builderRoot: String?
 
-    @Option(name: .long, help: "Flake package attribute to build inside the guest.")
-    var attribute: String = "guest-bundle"
-
-    @Option(name: .long, help: "Writable builder work disk size in GiB.")
-    var workDiskSizeGB: UInt64 = 64
-
-    @Option(name: .long, help: "Builder VM CPU count.")
-    var cpus: Int = 4
-
-    @Option(name: .long, help: "Builder VM memory size in GiB.")
-    var memoryGB: UInt64 = 8
-
-    @Option(name: .long, help: "Use this host directory as the temporary builder workspace.")
-    var workspace: String?
-
-    @Flag(name: .long, help: "Keep the temporary builder workspace after a successful build.")
-    var keepWorkspace: Bool = false
-
     mutating func run() async throws {
-        let sourceURL = GuestBuilderPaths.url(from: source ?? "../guest")
-        let outputURL = GuestBuilderPaths.url(from: output)
+        let sourceURL = GuestBuilderPaths.url(from: source)
         let builderRootURL = builderRoot.map { GuestBuilderPaths.url(from: $0) }
             ?? GuestBuilderPaths.defaultBuilderRootURL()
-        let workspaceURL = workspace.map { GuestBuilderPaths.url(from: $0) }
-
-        let options = GuestBuilderOptions(
-            builderRootURL: builderRootURL,
-            sourceURL: sourceURL,
-            outputURL: outputURL,
-            attribute: attribute,
-            workDiskSizeBytes: workDiskSizeGB * 1024 * 1024 * 1024,
-            cpuCount: cpus,
-            memorySizeBytes: memoryGB * 1024 * 1024 * 1024,
-            keepWorkspace: keepWorkspace,
-            workspaceURL: workspaceURL
-        )
 
         GuestBuilderLog.info("Builder root: \(builderRootURL.path)")
         GuestBuilderLog.info("Guest source: \(sourceURL.path)")
-        GuestBuilderLog.info("Output: \(outputURL.path)")
 
-        let builder = await GuestBuilder(options: options)
+        let builder = await GuestBuilder(options: GuestBuilderOptions(
+            builderRootURL: builderRootURL,
+            sourceURL: sourceURL
+        ))
         let builtURL = try await builder.build()
-        print("Built root bundle at \(builtURL.path)")
+        let workspaceURL = builtURL.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: workspaceURL) }
+
+        let rootStore = try RootStore()
+        let storedURL = try rootStore.storeRoot(named: name, from: builtURL)
+        print("Built and imported root '\(name)' to \(storedURL.path)")
     }
 }

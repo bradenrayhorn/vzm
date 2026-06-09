@@ -180,8 +180,5 @@
     script = ''
       ${lib.getExe builderAgent}
     '';
-    postStop = ''
-      ${pkgs.systemd}/bin/systemctl --no-block poweroff
-    '';
   };
 }
