@@ -1,24 +1,33 @@
-name: Build Guest Builder Bundle
+name: Build and Release vzm
 
 on:
   push:
     branches:
       - main
     paths:
-      - builder-guest/flake.nix
-      - builder-guest/flake.lock
-      - builder-guest/configuration.nix
-      - builder-guest/builder-agent.sh
       - .github/workflows/build.yml
+      - builder-guest/**
+      - proxy/**
+      - vzm/**
 
 permissions:
   contents: write
 
 jobs:
-  build-guest-builder:
-    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
+  version:
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Generate version number
+        id: version
+        run: |
+          VERSION=$(date +'%y.%m').${{ github.run_number }}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build-guest:
+    runs-on: ubuntu-24.04-arm
+    needs: version
     steps:
       - name: Checkout repository
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
@@ -28,40 +37,154 @@ jobs:
           sh <(curl -L https://nixos.org/nix/install) --daemon
           echo "experimental-features = nix-command flakes" | sudo tee -a /etc/nix/nix.conf
 
-      - name: Generate version number
-        id: version
-        run: |
-          VERSION=$(date +'%y.%m').${{ github.run_number }}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Build guest-builder bundle
+      - name: Build guest bundle
         run: |
           . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
           nix build ./builder-guest#packages.aarch64-linux.builder-guest-bundle --print-build-logs
 
-      - name: Package guest-builder bundle
+      - name: Stage guest bundle
         run: |
-          mkdir -p release
+          mkdir -p dist/builder-guest/result
           RESULT_PATH=$(readlink -f result)
-          test -d "$RESULT_PATH"
-          ZIP_PATH="$PWD/release/vzm-${{ steps.version.outputs.version }}-aarch64-guest-builder.zip"
-          (
-            cd "$RESULT_PATH"
-            zip -r "$ZIP_PATH" kernel initrd rootfs.squashfs manifest.json
-          )
+          cp "$RESULT_PATH/kernel" dist/builder-guest/result/kernel
+          cp "$RESULT_PATH/initrd" dist/builder-guest/result/initrd
+          cp "$RESULT_PATH/rootfs.squashfs" dist/builder-guest/result/rootfs.squashfs
+          cp "$RESULT_PATH/manifest.json" dist/builder-guest/result/manifest.json
 
-      - name: Upload guest-builder artifact
+      - name: Upload guest artifact
         uses: actions/upload-artifact@v4
         with:
-          name: guest-builder
-          path: release/vzm-${{ steps.version.outputs.version }}-aarch64-guest-builder.zip
+          name: guest-bundle
+          path: dist
           if-no-files-found: error
           retention-days: 7
 
-      - name: Create GitHub Release
+  build-vzm:
+    runs-on: macos-14
+    needs: version
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - name: Build vzm
+        working-directory: vzm
+        run: |
+          swift build -c release --product vzm
+
+      - name: Stage vzm binary
+        run: |
+          mkdir -p dist
+          cp vzm/.build/release/vzm dist/vzm
+
+      - name: Upload vzm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vzm-binary
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  build-proxy:
+    runs-on: ubuntu-latest
+    needs: version
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+
+      - name: Build proxy
+        working-directory: proxy
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p ../dist
+          go build -o ../dist/vzm-proxy .
+
+      - name: Upload proxy artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-binary
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  package-release:
+    runs-on: macos-14
+    needs:
+      - version
+      - build-guest
+      - build-vzm
+      - build-proxy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - name: Download guest artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: guest-bundle
+          path: artifacts/guest
+
+      - name: Download vzm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vzm-binary
+          path: artifacts/vzm
+
+      - name: Download proxy artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: proxy-binary
+          path: artifacts/proxy
+
+      - name: Assemble release bundle
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          ROOT="release/vzm-${VERSION}-macos-arm64"
+          mkdir -p "$ROOT"
+          cp artifacts/vzm/vzm "$ROOT/vzm"
+          cp artifacts/proxy/vzm-proxy "$ROOT/vzm-proxy"
+          mkdir -p "$ROOT/builder-guest"
+          cp -R artifacts/guest/builder-guest/result "$ROOT/builder-guest/result"
+
+      - name: Ad-hoc sign binaries
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          ROOT="release/vzm-${VERSION}-macos-arm64"
+          codesign -s - -f --entitlements vzm/vzm.entitlements "$ROOT/vzm"
+          codesign -s - -f "$ROOT/vzm-proxy"
+
+      - name: Create release zip
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mkdir -p out
+          ROOT="vzm-${VERSION}-macos-arm64"
+          (cd release && ditto -c -k --sequesterRsrc --keepParent "$ROOT" "../out/${ROOT}.zip")
+          shasum -a 256 "out/${ROOT}.zip" > "out/${ROOT}.zip.sha256"
+
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --title "v${{ steps.version.outputs.version }}" \
-            "release/vzm-${{ steps.version.outputs.version }}-aarch64-guest-builder.zip"
+          TAG="v${VERSION}"
+          ZIP="out/vzm-${VERSION}-macos-arm64.zip"
+          SUM="out/vzm-${VERSION}-macos-arm64.zip.sha256"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" "$SUM" --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              "$ZIP" \
+              "$SUM"
+          fi

@@ -198,13 +198,9 @@ struct BuildRoot: AsyncParsableCommand {
     @Argument(help: "Name to import the built root as.")
     var name: String
 
-    @Option(name: .long, help: "Path to the already-built builder guest bundle. Defaults to the nearest builder-guest/result found above the current directory.")
-    var builderRoot: String?
-
     mutating func run() async throws {
         let sourceURL = GuestBuilderPaths.url(from: source)
-        let builderRootURL = builderRoot.map { GuestBuilderPaths.url(from: $0) }
-            ?? GuestBuilderPaths.defaultBuilderRootURL()
+        let builderRootURL = GuestBuilderPaths.builderRootURL()
 
         GuestBuilderLog.info("Builder root: \(builderRootURL.path)")
         GuestBuilderLog.info("Guest source: \(sourceURL.path)")

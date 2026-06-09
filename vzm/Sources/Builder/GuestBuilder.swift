@@ -412,28 +412,17 @@ enum GuestBuilderPaths {
         return url.standardizedFileURL
     }
 
-    static func defaultBuilderRootURL(fileManager: FileManager = .default) -> URL {
-        let currentURL = URL(fileURLWithPath: fileManager.currentDirectoryPath).standardizedFileURL
-        var searchURL = currentURL
-
-        for _ in 0..<6 {
-            let candidateURL = searchURL
-                .appendingPathComponent("builder-guest", isDirectory: true)
-                .appendingPathComponent("result", isDirectory: true)
-                .standardizedFileURL
-            if fileManager.fileExists(atPath: candidateURL.path) {
-                return candidateURL
-            }
-
-            let parentURL = searchURL.deletingLastPathComponent()
-            if parentURL.path == searchURL.path {
-                break
-            }
-            searchURL = parentURL
+    static func builderRootURL(fileManager: FileManager = .default) -> URL {
+        if let path = ProcessInfo.processInfo.environment["VZM_BUILDER_ROOT"], !path.isEmpty {
+            return url(from: path, fileManager: fileManager)
         }
 
-        return currentURL
-            .appendingPathComponent("../builder-guest/result", isDirectory: true)
+        let executableURL = URL(fileURLWithPath: CommandLine.arguments.first ?? "vzm")
+            .standardizedFileURL
+        return executableURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("builder-guest", isDirectory: true)
+            .appendingPathComponent("result", isDirectory: true)
             .standardizedFileURL
     }
 }
