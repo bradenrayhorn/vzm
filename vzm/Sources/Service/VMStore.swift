@@ -1,8 +1,18 @@
 import Foundation
 
+enum VMStateDisk {
+    static let imageFileName = "state.raw"
+    static let blockDeviceIdentifier = "vzm-state"
+    static let mountPath = "/persist"
+    static let sizeBytes: UInt64 = 256 * 1024 * 1024
+}
+
 struct StoredVM {
     let directoryURL: URL
     let manifest: VMManifest
+
+    var stateImageURL: URL { directoryURL.appendingPathComponent(VMStateDisk.imageFileName) }
+    var lockURL: URL { directoryURL.appendingPathComponent("in-use.lock") }
 }
 
 struct VMShare: Codable {
@@ -60,6 +70,9 @@ struct VMStore {
         case invalidDiskMountPath(String)
         case duplicateDiskMountPath(String)
         case duplicateDiskName(String)
+        case reservedDiskName(String)
+        case ioError(operation: String, path: String)
+        case vmInUse(String)
 
         var errorDescription: String? {
             switch self {
@@ -81,6 +94,12 @@ struct VMStore {
                 return "Duplicate disk guest mount path: \(path)"
             case .duplicateDiskName(let name):
                 return "Duplicate disk name: \(name)"
+            case .reservedDiskName(let name):
+                return "Reserved disk name: \(name)"
+            case .ioError(let operation, let path):
+                return "I/O error during \(operation): \(path)"
+            case .vmInUse(let name):
+                return "VM is already in use: \(name)"
             }
         }
     }
@@ -110,18 +129,18 @@ struct VMStore {
     }
 
     func createVM(named name: String, root: String, sshPort: UInt16, shares: [VMShare] = [], disks: [VMDiskMount] = []) throws -> URL {
-        let rootBundle: RootBundle
         do {
-            rootBundle = try rootStore.loadRoot(named: root)
+            _ = try rootStore.loadRoot(named: root)
         } catch RootStore.Error.rootDoesNotExist {
             throw Error.rootDoesNotExist(root)
         }
 
         try validateShares(shares)
-        try validateDisks(disks, rootBundle: rootBundle)
+        try validateDisks(disks)
 
         let vmDirectoryURL = vmsDirectoryURL.appendingPathComponent(name, isDirectory: true)
         try fileManager.createDirectory(at: vmDirectoryURL, withIntermediateDirectories: true)
+        try ensureStateDisk(in: vmDirectoryURL)
 
         let manifest = VMManifest(name: name, root: root, sshPort: sshPort, shares: shares, disks: disks)
         let manifestURL = vmDirectoryURL.appendingPathComponent("manifest.json")
@@ -145,6 +164,30 @@ struct VMStore {
         return StoredVM(directoryURL: vmDirectoryURL, manifest: manifest)
     }
 
+    func acquireLease(for vm: StoredVM) throws -> FileLockLease {
+        let lease = FileLockLease()
+        try lease.addExclusiveLock(
+            at: vm.lockURL,
+            fileManager: fileManager,
+            createFailedError: Error.ioError(operation: "create lock file", path: vm.lockURL.path),
+            alreadyLockedError: Error.vmInUse(vm.manifest.name)
+        )
+        return lease
+    }
+
+    func ensureStateDisk(for vm: StoredVM) throws {
+        try ensureStateDisk(in: vm.directoryURL)
+    }
+
+    private func ensureStateDisk(in vmDirectoryURL: URL) throws {
+        let stateImageURL = vmDirectoryURL.appendingPathComponent(VMStateDisk.imageFileName)
+        try SparseDiskImage.createIfMissing(
+            at: stateImageURL,
+            sizeBytes: VMStateDisk.sizeBytes,
+            fileManager: fileManager
+        )
+    }
+
     private func validateShares(_ shares: [VMShare]) throws {
         var seenMountPaths = Set<String>()
         var seenTags = Set<String>()
@@ -154,7 +197,7 @@ struct VMStore {
                 throw Error.invalidShareHostPath(share.hostPath)
             }
 
-            guard isValidGuestMountPath(share.mountPath) else {
+            guard isValidGuestMountPath(share.mountPath), !isReservedGuestMountPath(share.mountPath) else {
                 throw Error.invalidShareMountPath(share.mountPath)
             }
 
@@ -168,14 +211,18 @@ struct VMStore {
         }
     }
 
-    private func validateDisks(_ disks: [VMDiskMount], rootBundle: RootBundle) throws {
+    private func validateDisks(_ disks: [VMDiskMount]) throws {
         var seenNames = Set<String>()
         var seenMountPaths = Set<String>()
 
         for disk in disks {
+            guard disk.name != VMStateDisk.blockDeviceIdentifier else {
+                throw Error.reservedDiskName(disk.name)
+            }
+
             _ = try diskStore.loadDisk(named: disk.name)
 
-            guard isValidGuestMountPath(disk.mountPath) else {
+            guard isValidGuestMountPath(disk.mountPath), !isReservedGuestMountPath(disk.mountPath) else {
                 throw Error.invalidDiskMountPath(disk.mountPath)
             }
 
@@ -203,6 +250,10 @@ struct VMStore {
         }
 
         return true
+    }
+
+    private func isReservedGuestMountPath(_ path: String) -> Bool {
+        path == VMStateDisk.mountPath || path.hasPrefix(VMStateDisk.mountPath + "/")
     }
 }
 

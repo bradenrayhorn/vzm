@@ -1,5 +1,4 @@
 import Foundation
-import Virtualization
 
 struct DiskManifest: Codable {
     let schemaVersion: Int
@@ -15,21 +14,6 @@ struct DiskBundle {
     let manifest: DiskManifest
 
     var imageURL: URL { directoryURL.appendingPathComponent(manifest.image) }
-}
-
-final class DiskLease {
-    private let handles: [FileHandle]
-
-    init(handles: [FileHandle]) {
-        self.handles = handles
-    }
-
-    deinit {
-        for handle in handles {
-            flock(handle.fileDescriptor, LOCK_UN)
-            try? handle.close()
-        }
-    }
 }
 
 struct DiskStore {
@@ -102,13 +86,7 @@ struct DiskStore {
 
         do {
             let imageURL = diskDirectoryURL.appendingPathComponent("disk.raw")
-            guard fileManager.createFile(atPath: imageURL.path, contents: nil) else {
-                throw Error.ioError(operation: "create disk image", path: imageURL.path)
-            }
-
-            let handle = try FileHandle(forWritingTo: imageURL)
-            try handle.truncate(atOffset: sizeBytes)
-            try handle.close()
+            try SparseDiskImage.create(at: imageURL, sizeBytes: sizeBytes, fileManager: fileManager)
 
             let manifest = DiskManifest(
                 schemaVersion: 1,
@@ -167,25 +145,18 @@ struct DiskStore {
         return bundle
     }
 
-    func acquireLease(for diskBundles: [DiskBundle]) throws -> DiskLease {
-        let handles = try diskBundles.map { diskBundle in
+    func acquireLease(for diskBundles: [DiskBundle]) throws -> FileLockLease {
+        let lease = FileLockLease()
+        for diskBundle in diskBundles {
             let lockURL = diskBundle.directoryURL.appendingPathComponent("in-use.lock")
-            if !fileManager.fileExists(atPath: lockURL.path) {
-                guard fileManager.createFile(atPath: lockURL.path, contents: nil) else {
-                    throw Error.ioError(operation: "create lock file", path: lockURL.path)
-                }
-            }
-
-            let handle = try FileHandle(forWritingTo: lockURL)
-            let result = flock(handle.fileDescriptor, LOCK_EX | LOCK_NB)
-            guard result == 0 else {
-                try? handle.close()
-                throw Error.diskInUse(diskBundle.manifest.name)
-            }
-            return handle
+            try lease.addExclusiveLock(
+                at: lockURL,
+                fileManager: fileManager,
+                createFailedError: Error.ioError(operation: "create lock file", path: lockURL.path),
+                alreadyLockedError: Error.diskInUse(diskBundle.manifest.name)
+            )
         }
-
-        return DiskLease(handles: handles)
+        return lease
     }
 
     private func isValidDiskName(_ name: String) -> Bool {

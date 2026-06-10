@@ -18,7 +18,8 @@ class Runner {
     let vmBundle: StoredVM
     let rootBundle: RootBundle
     let diskBundles: [DiskBundle]
-    let diskLease: DiskLease
+    let vmLease: FileLockLease
+    let diskLease: FileLockLease
     let machine: VZVirtualMachine
     let stopDelegate: VMStopDelegate
 
@@ -27,6 +28,10 @@ class Runner {
     init(vmBundle: StoredVM, rootBundle: RootBundle, resources: VMResources = .default) throws {
         self.vmBundle = vmBundle
         self.rootBundle = rootBundle
+
+        let vmStore = try VMStore()
+        self.vmLease = try vmStore.acquireLease(for: vmBundle)
+        try vmStore.ensureStateDisk(for: vmBundle)
 
         let diskStore = try DiskStore()
         self.diskBundles = try vmBundle.manifest.disks.map { try diskStore.loadDisk(named: $0.name) }
@@ -192,16 +197,10 @@ struct VZConfiguration {
         configuration.serialPorts = [console]
         var storageDevices = [VZStorageDeviceConfiguration]()
         storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: rootFs))
+        storageDevices.append(try writableBlockDevice(url: vmBundle.stateImageURL, identifier: VMStateDisk.blockDeviceIdentifier))
+
         for diskBundle in diskBundles {
-            let attachment = try VZDiskImageStorageDeviceAttachment(
-                url: diskBundle.imageURL,
-                readOnly: false,
-                cachingMode: .automatic,
-                synchronizationMode: .fsync
-            )
-            let blockDevice = VZVirtioBlockDeviceConfiguration(attachment: attachment)
-            blockDevice.blockDeviceIdentifier = diskBundle.manifest.name
-            storageDevices.append(blockDevice)
+            storageDevices.append(try writableBlockDevice(url: diskBundle.imageURL, identifier: diskBundle.manifest.name))
         }
         configuration.storageDevices = storageDevices
         configuration.cpuCount = resources.cpuCount
@@ -218,6 +217,18 @@ struct VZConfiguration {
 
         try configuration.validate()
         return configuration
+    }
+
+    private func writableBlockDevice(url: URL, identifier: String) throws -> VZVirtioBlockDeviceConfiguration {
+        let attachment = try VZDiskImageStorageDeviceAttachment(
+            url: url,
+            readOnly: false,
+            cachingMode: .automatic,
+            synchronizationMode: .fsync
+        )
+        let blockDevice = VZVirtioBlockDeviceConfiguration(attachment: attachment)
+        blockDevice.blockDeviceIdentifier = identifier
+        return blockDevice
     }
 
     private func buildKernelCommandLine(vmBundle: StoredVM, rootBundle: RootBundle) -> String {

@@ -195,13 +195,7 @@ final class GuestBuilder {
 
     private func createWorkDisk(at url: URL, sizeBytes: UInt64) throws {
         GuestBuilderLog.info("Creating sparse work disk: \(url.path) (\(sizeBytes / 1024 / 1024 / 1024) GiB)")
-        guard fileManager.createFile(atPath: url.path, contents: nil) else {
-            throw GuestBuilderError.invalidFile(url.path)
-        }
-
-        let handle = try FileHandle(forWritingTo: url)
-        try handle.truncate(atOffset: sizeBytes)
-        try handle.close()
+        try SparseDiskImage.create(at: url, sizeBytes: sizeBytes, fileManager: fileManager)
     }
 
     private func writeRequest(to url: URL) throws {

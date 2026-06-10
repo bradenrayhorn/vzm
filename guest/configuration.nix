@@ -22,6 +22,17 @@
   services.openssh = {
     enable = true;
     startWhenNeeded = lib.mkForce false;
+    hostKeys = [
+      {
+        bits = 4096;
+        path = "/persist/etc/ssh/ssh_host_rsa_key";
+        type = "rsa";
+      }
+      {
+        path = "/persist/etc/ssh/ssh_host_ed25519_key";
+        type = "ed25519";
+      }
+    ];
     settings = {
       PermitRootLogin = "no";
       PasswordAuthentication = false;
@@ -68,6 +79,7 @@
     "vmw_vsock_virtio_transport"
     "overlay"
   ];
+
   boot.kernelModules = [];
   boot.extraModulePackages = [ ];
 
@@ -82,6 +94,14 @@
     device = "none";
     fsType = "tmpfs";
     options = [ "mode=0755" ];
+  };
+
+  # The per-VM state disk is attached by vzm as virtio-vzm-state. It is not
+  # needed by stage 1, so systemd can format and mount it during normal boot.
+  fileSystems."/persist" = {
+    device = "/dev/disk/by-id/virtio-vzm-state";
+    fsType = "ext4";
+    autoFormat = true;
   };
 
   # The VM attaches rootfs.squashfs as /dev/vda.  The image produced by
