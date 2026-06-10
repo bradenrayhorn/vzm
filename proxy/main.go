@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -24,14 +27,26 @@ import (
 )
 
 var (
-	outboundClient    = &http.Client{Transport: newOutboundTransport()}
+	publicDialer = &net.Dialer{
+		Timeout:        15 * time.Second,
+		ControlContext: rejectBlockedDialDestination,
+	}
+	outboundClient = &http.Client{
+		Transport: newOutboundTransport(),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	controlUnixPath   string
 	approvalRequestID uint64
 )
 
+var errBlockedDestination = errors.New("blocked destination")
+
 func newOutboundTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
+	transport.DialContext = dialPublicTCPContext
 	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	transport.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
 	return transport
@@ -40,6 +55,55 @@ func newOutboundTransport() *http.Transport {
 var secretPattern = regexp.MustCompile(`\{vzm:([^}]+)\}`)
 
 const maxSecretScanBodySize int64 = 1 << 20
+
+var publicIPv6GlobalUnicastPrefix = mustPrefix("2000::/3")
+
+// IANA special-purpose and non-public destination ranges. IPv4-mapped IPv6
+// addresses are handled by Unmap so the embedded IPv4 address follows IPv4 policy.
+var blockedDestinationPrefixes = []netip.Prefix{
+	mustPrefix("0.0.0.0/8"),         // "this" network
+	mustPrefix("10.0.0.0/8"),        // private-use
+	mustPrefix("100.64.0.0/10"),     // carrier-grade NAT
+	mustPrefix("127.0.0.0/8"),       // loopback
+	mustPrefix("169.254.0.0/16"),    // link-local
+	mustPrefix("172.16.0.0/12"),     // private-use
+	mustPrefix("192.0.0.0/24"),      // IETF protocol assignments
+	mustPrefix("192.0.2.0/24"),      // documentation
+	mustPrefix("192.31.196.0/24"),   // AS112
+	mustPrefix("192.52.193.0/24"),   // AMT
+	mustPrefix("192.88.99.0/24"),    // deprecated 6to4 relay anycast
+	mustPrefix("192.168.0.0/16"),    // private-use
+	mustPrefix("192.175.48.0/24"),   // AS112
+	mustPrefix("198.18.0.0/15"),     // benchmarking
+	mustPrefix("198.51.100.0/24"),   // documentation
+	mustPrefix("203.0.113.0/24"),    // documentation
+	mustPrefix("224.0.0.0/4"),       // multicast
+	mustPrefix("240.0.0.0/4"),       // reserved/broadcast
+	mustPrefix("::/128"),            // unspecified
+	mustPrefix("::1/128"),           // loopback
+	mustPrefix("64:ff9b::/96"),      // IPv4/IPv6 translation
+	mustPrefix("64:ff9b:1::/48"),    // IPv4/IPv6 translation
+	mustPrefix("100::/64"),          // discard-only
+	mustPrefix("2001::/23"),         // IETF protocol assignments
+	mustPrefix("2001:2::/48"),       // benchmarking
+	mustPrefix("2001:db8::/32"),     // documentation
+	mustPrefix("2002::/16"),         // 6to4
+	mustPrefix("2620:4f:8000::/48"), // AS112
+	mustPrefix("3fff::/20"),         // documentation
+	mustPrefix("5f00::/16"),         // SRv6 SIDs
+	mustPrefix("fc00::/7"),          // unique local
+	mustPrefix("fe80::/10"),         // link-local
+	mustPrefix("fec0::/10"),         // deprecated site-local
+	mustPrefix("ff00::/8"),          // multicast
+}
+
+func mustPrefix(prefix string) netip.Prefix {
+	parsed, err := netip.ParsePrefix(prefix)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
+}
 
 type approvalRequest struct {
 	ID      string   `json:"id"`
@@ -186,7 +250,6 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid CONNECT target", http.StatusBadRequest)
 		return
 	}
-
 	switch targetPort {
 	case "22":
 		handleSSHTunnel(w, targetHost, targetPort)
@@ -224,7 +287,11 @@ func handleSSHTunnel(w http.ResponseWriter, targetHost, targetPort string) {
 	upstreamConn, err := dialPublicTCP(targetHost, targetPort)
 	if err != nil {
 		log.Printf("SSH tunnel dial failed for %s:%s: %v", targetHost, targetPort, err)
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		if errors.Is(err, errBlockedDestination) {
+			http.Error(w, "Destination not allowed", http.StatusForbidden)
+		} else {
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		}
 		return
 	}
 	defer upstreamConn.Close()
@@ -248,44 +315,57 @@ func handleSSHTunnel(w http.ResponseWriter, targetHost, targetPort string) {
 }
 
 func dialPublicTCP(host, port string) (net.Conn, error) {
-	if ip := net.ParseIP(host); ip != nil {
-		if !isAllowedDestinationIP(ip) {
-			return nil, fmt.Errorf("blocked destination address %s", ip.String())
-		}
-		return net.DialTimeout("tcp", net.JoinHostPort(ip.String(), port), 15*time.Second)
-	}
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return nil, err
-	}
-
-	var lastErr error
-	for _, ip := range ips {
-		if !isAllowedDestinationIP(ip) {
-			log.Printf("blocked destination address %s for %s", ip.String(), host)
-			continue
-		}
-
-		conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), port), 15*time.Second)
-		if err == nil {
-			return conn, nil
-		}
-		lastErr = err
-	}
-
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, fmt.Errorf("no public addresses for %s", host)
+	return dialPublicTCPContext(context.Background(), "tcp", net.JoinHostPort(host, port))
 }
 
-func isAllowedDestinationIP(ip net.IP) bool {
-	return ip != nil &&
-		ip.IsGlobalUnicast() &&
-		!ip.IsLoopback() &&
-		!ip.IsPrivate() &&
-		!ip.IsLinkLocalUnicast()
+func dialPublicTCPContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return publicDialer.DialContext(ctx, network, address)
+}
+
+func rejectBlockedDialDestination(_ context.Context, network, address string, _ syscall.RawConn) error {
+	if !strings.HasPrefix(network, "tcp") {
+		return nil
+	}
+
+	addrPort, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return fmt.Errorf("%w: invalid resolved address %q", errBlockedDestination, address)
+	}
+	addr := addrPort.Addr()
+	if !isAllowedDestinationAddr(addr) {
+		return fmt.Errorf("%w: %s", errBlockedDestination, addr)
+	}
+	return nil
+}
+
+func isAllowedDestinationAddr(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.Zone() != "" {
+		return false
+	}
+
+	addr = addr.Unmap()
+	if !addr.IsGlobalUnicast() ||
+		addr.IsUnspecified() ||
+		addr.IsLoopback() ||
+		addr.IsPrivate() ||
+		addr.IsLinkLocalUnicast() ||
+		addr.IsLinkLocalMulticast() ||
+		addr.IsMulticast() {
+		return false
+	}
+	if addr.Is6() && !publicIPv6GlobalUnicastPrefix.Contains(addr) {
+		return false
+	}
+	return !isBlockedDestinationAddr(addr)
+}
+
+func isBlockedDestinationAddr(addr netip.Addr) bool {
+	for _, prefix := range blockedDestinationPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
@@ -362,8 +442,15 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 
 		resp, err := outboundClient.Do(innerReq)
 		if err != nil {
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
 			log.Println("Error executing upstream request:", err)
-			tlsConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			if errors.Is(err, errBlockedDestination) {
+				tlsConn.Write([]byte("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			} else {
+				tlsConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			}
 			break
 		}
 
