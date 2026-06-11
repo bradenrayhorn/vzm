@@ -75,6 +75,7 @@
   ];
   boot.initrd.kernelModules = [
     "virtiofs"
+    "virtio_rng"
     "vsock"
     "vmw_vsock_virtio_transport"
     "overlay"
@@ -137,13 +138,8 @@
   systemd.services.register-nix-store = {
     description = "Register immutable squashfs Nix store paths";
     unitConfig.DefaultDependencies = false;
-    wantedBy = [ "sysinit.target" ];
-    before = [
-      "sysinit.target"
-      "shutdown.target"
-      "nix-daemon.socket"
-      "nix-daemon.service"
-    ];
+    wantedBy = [ "multi-user.target" ];
+    before = [ "shutdown.target" ];
     after = [ "local-fs.target" ];
     conflicts = [ "shutdown.target" ];
     restartIfChanged = false;
@@ -158,10 +154,23 @@
     '';
   };
 
+  systemd.services.nix-daemon = {
+    requires = [ "register-nix-store.service" ];
+    after = [ "register-nix-store.service" ];
+  };
+
+  # sshd uses host keys stored under /persist.  /persist is mounted by
+  # local-fs.target before normal services, and this explicit ordering keeps
+  # that requirement local to sshd instead of making vzm-mounts block sshd.
+  systemd.services.sshd = {
+    requires = [ "persist.mount" ];
+    after = lib.mkForce [ "persist.mount" ];
+  };
+
   networking.useDHCP = false;
   networking.hostName = "vzm-guest";
   networking.interfaces = { };
-  networking.firewall.enable = true;
+  networking.firewall.enable = lib.mkForce false;
   networking.firewall.allowedTCPPorts = [ 22 ];
 
   environment.systemPackages = with pkgs; [
@@ -172,7 +181,7 @@
   systemd.services.vzm-mounts = {
     description = "Mount vzm shared directories and disks";
     wantedBy = [ "multi-user.target" ];
-    before = [ "multi-user.target" "sshd.service" ];
+    before = [ "multi-user.target" ];
     after = [ "local-fs.target" ];
     restartIfChanged = false;
     serviceConfig = {

@@ -18,7 +18,6 @@ in
     description = "Fetch VZM MITM proxy CA";
     wantedBy = [ "multi-user.target" ];
     before = [
-      "sshd.service"
       "nix-daemon.service"
       "vzm-https-proxy.service"
     ];
@@ -60,7 +59,6 @@ in
     wantedBy = [ "multi-user.target" ];
     after = [ "vzm-mitm-ca.service" ];
     before = [
-      "sshd.service"
       "nix-daemon.service"
     ];
     serviceConfig = {

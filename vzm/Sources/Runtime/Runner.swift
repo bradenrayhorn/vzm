@@ -175,7 +175,7 @@ extension VMResources {
 
 struct VZConfiguration {
     static let defaultCPUCount = 4
-    static let defaultMemorySizeBytes: UInt64 = 8 * VMResources.gibibyte
+    static let defaultMemorySizeBytes: UInt64 = 2 * VMResources.gibibyte
 
     func build(vmBundle: StoredVM, rootBundle: RootBundle, diskBundles: [DiskBundle], resources: VMResources) throws -> VZVirtualMachineConfiguration {
         let configuration = VZVirtualMachineConfiguration()
@@ -203,6 +203,7 @@ struct VZConfiguration {
             storageDevices.append(try writableBlockDevice(url: diskBundle.imageURL, identifier: diskBundle.manifest.name))
         }
         configuration.storageDevices = storageDevices
+        configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         configuration.cpuCount = resources.cpuCount
         configuration.memorySize = resources.memorySizeBytes
         configuration.networkDevices = []
