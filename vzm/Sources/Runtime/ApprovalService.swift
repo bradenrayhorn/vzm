@@ -21,13 +21,15 @@ final class ApprovalService {
 
     func askForApproval(request: ProxyApprovalRequest) async -> Bool {
         var request = request
+        let hasCredentialHeaders = hasCredentialHeaders(request)
         let knownDomain = !request.domain.isEmpty && approvedConnectDomainStore.contains(request.domain)
         if !request.domain.isEmpty && !knownDomain && !request.warnings.contains(Self.neverSeenDomainWarning) {
             request.warnings.append(Self.neverSeenDomainWarning)
         }
-        if request.type == "REQUEST" && hasCredentialHeaders(request) && !request.warnings.contains(Self.credentialHeaderWarning) {
+        if request.type == "REQUEST" && hasCredentialHeaders && !request.warnings.contains(Self.credentialHeaderWarning) {
             request.warnings.append(Self.credentialHeaderWarning)
         }
+        request.headers = ApprovalHeaderMasker.visibleHeaders(for: request)
 
         guard request.type == "CONNECT", !request.domain.isEmpty else {
             return await ApprovalCoordinator.shared.askForApproval(request: request)
