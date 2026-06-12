@@ -159,6 +159,10 @@ class ApprovalCoordinator {
 struct ApprovalPromptView: View {
     let request: ProxyApprovalRequest
     let onResolve: (Bool) -> Void
+
+    private var headerText: String {
+        request.headers.map { "\($0.name): \($0.value)" }.joined(separator: "\n")
+    }
     
     var body: some View {
         VStack(spacing: 16) {
@@ -189,6 +193,21 @@ struct ApprovalPromptView: View {
                         .textSelection(.enabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+                if !request.headers.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Headers")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ScrollView {
+                            Text(headerText)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 140)
+                    }
+                }
 
                 if let body = request.body {
                     VStack(alignment: .leading, spacing: 4) {

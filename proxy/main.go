@@ -109,14 +109,20 @@ func mustPrefix(prefix string) netip.Prefix {
 }
 
 type approvalRequest struct {
-	ID       string        `json:"id"`
-	Type     string        `json:"type"`
-	Domain   string        `json:"domain"`
-	Method   string        `json:"method"`
-	URL      string        `json:"url"`
-	Body     *approvalBody `json:"body,omitempty"`
-	Warnings []string      `json:"warnings"`
-	Secrets  []string      `json:"secrets"`
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Domain   string           `json:"domain"`
+	Method   string           `json:"method"`
+	URL      string           `json:"url"`
+	Headers  []approvalHeader `json:"headers"`
+	Body     *approvalBody    `json:"body,omitempty"`
+	Warnings []string         `json:"warnings"`
+	Secrets  []string         `json:"secrets"`
+}
+
+type approvalHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type approvalBody struct {
@@ -135,6 +141,9 @@ func askForApproval(request approvalRequest) approvalResponse {
 		return approvalResponse{Approved: false}
 	}
 	request.ID = nextApprovalRequestID()
+	if request.Headers == nil {
+		request.Headers = []approvalHeader{}
+	}
 	if request.Secrets == nil {
 		request.Secrets = []string{}
 	}
@@ -256,9 +265,9 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	switch targetPort {
 	case "22":
-		handleSSHTunnel(w, targetHost, targetPort)
+		handleSSHTunnel(w, targetHost, targetPort, approvalHeadersForRequest(r))
 	case "443":
-		handleHTTPSConnect(w, targetHost, targetPort)
+		handleHTTPSConnect(w, targetHost, targetPort, approvalHeadersForRequest(r))
 	default:
 		log.Printf("blocked CONNECT to unsupported port %s for %s", targetPort, targetHost)
 		http.Error(w, "CONNECT port not allowed", http.StatusForbidden)
@@ -282,8 +291,8 @@ func connectTarget(r *http.Request) (string, string, error) {
 	return host, port, nil
 }
 
-func handleSSHTunnel(w http.ResponseWriter, targetHost, targetPort string) {
-	if !askForApproval(approvalRequest{Type: "SSH", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort)}).Approved {
+func handleSSHTunnel(w http.ResponseWriter, targetHost, targetPort string, headers []approvalHeader) {
+	if !askForApproval(approvalRequest{Type: "SSH", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort), Headers: headers}).Approved {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
@@ -372,8 +381,8 @@ func isBlockedDestinationAddr(addr netip.Addr) bool {
 	return false
 }
 
-func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
-	if !askForApproval(approvalRequest{Type: "CONNECT", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort)}).Approved {
+func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string, headers []approvalHeader) {
+	if !askForApproval(approvalRequest{Type: "CONNECT", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort), Headers: headers}).Approved {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
@@ -433,6 +442,7 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 			Domain:   targetHost,
 			Method:   innerReq.Method,
 			URL:      approvalURL(innerReq, targetHost),
+			Headers:  approvalHeadersForRequest(innerReq),
 			Body:     body,
 			Warnings: warnings,
 			Secrets:  secretNames,
@@ -510,6 +520,45 @@ func approvalURL(r *http.Request, fallbackHost string) string {
 	}
 	text, _ := approvalDisplayBytes([]byte(host + r.RequestURI))
 	return text
+}
+
+func approvalHeadersForRequest(r *http.Request) []approvalHeader {
+	if r == nil {
+		return nil
+	}
+
+	headers := make([]approvalHeader, 0, len(r.Header)+1)
+	host := r.Host
+	if host == "" {
+		host = r.Header.Get("Host")
+	}
+	if host != "" {
+		headers = append(headers, approvalHeaderForDisplay("Host", host))
+	}
+
+	displayHeader := make(http.Header, len(r.Header)+1)
+	for name, values := range r.Header {
+		if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Transfer-Encoding") {
+			continue
+		}
+		displayHeader[name] = values
+	}
+	if len(r.TransferEncoding) > 0 {
+		displayHeader.Set("Transfer-Encoding", strings.Join(r.TransferEncoding, ", "))
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(displayHeader)) {
+		for _, value := range displayHeader[name] {
+			headers = append(headers, approvalHeaderForDisplay(name, value))
+		}
+	}
+	return headers
+}
+
+func approvalHeaderForDisplay(name, value string) approvalHeader {
+	displayName, _ := approvalDisplayBytes([]byte(name))
+	displayValue, _ := approvalDisplayBytes([]byte(value))
+	return approvalHeader{Name: displayName, Value: displayValue}
 }
 
 func approvalBodyForRequest(r *http.Request) (*approvalBody, []string) {

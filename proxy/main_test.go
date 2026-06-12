@@ -94,6 +94,37 @@ func TestApprovalURLEscapesInvisibleUnicode(t *testing.T) {
 	}
 }
 
+func TestApprovalHeadersForRequest(t *testing.T) {
+	r := &http.Request{
+		Host: "cache.example",
+		Header: http.Header{
+			"X-Zed":     {"z"},
+			"Accept":    {"application/json", "text/plain"},
+			"X-Unicode": {"ok🙂"},
+		},
+		TransferEncoding: []string{"chunked"},
+	}
+
+	got := approvalHeadersForRequest(r)
+	want := []approvalHeader{
+		{Name: "Host", Value: "cache.example"},
+		{Name: "Accept", Value: "application/json"},
+		{Name: "Accept", Value: "text/plain"},
+		{Name: "Transfer-Encoding", Value: "chunked"},
+		{Name: "X-Unicode", Value: `ok\xF0\x9F\x99\x82`},
+		{Name: "X-Zed", Value: "z"},
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("approvalHeadersForRequest() length = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("approvalHeadersForRequest()[%d] = %#v, want %#v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestApprovalBodyForAnyMethod(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {

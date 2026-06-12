@@ -224,9 +224,15 @@ struct ProxyApprovalRequest: Codable, Sendable {
     var domain: String
     var method: String
     var url: String
+    var headers: [ProxyApprovalHeader]
     var body: ProxyApprovalBody?
     var warnings: [String]
     var secrets: [String]
+}
+
+struct ProxyApprovalHeader: Codable, Sendable {
+    var name: String
+    var value: String
 }
 
 struct ProxyApprovalBody: Codable, Sendable {
