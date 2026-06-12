@@ -165,18 +165,45 @@ struct ApprovalPromptView: View {
             Text("Outbound")
                 .font(.headline)
             
-            VStack(spacing: 4) {
+            VStack(spacing: 8) {
                 Text(request.type)
-                    .font(.body)
-
                 Text(request.domain)
                     .font(.body.bold())
 
-                Text("\(request.method) \(request.path)")
-                    .font(.body)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
+                if !request.warnings.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(request.warnings, id: \.self) { warning in
+                            Text("⚠️ \(warning)")
+                                .foregroundStyle(.orange)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(request.method)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(request.url)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let body = request.body {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Body")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ScrollView {
+                            Text(body.text)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 180)
+                    }
+                }
 
                 if !request.secrets.isEmpty {
                     VStack(spacing: 4) {

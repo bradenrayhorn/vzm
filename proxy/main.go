@@ -54,7 +54,10 @@ func newOutboundTransport() *http.Transport {
 
 var secretPattern = regexp.MustCompile(`\{vzm:([^}]+)\}`)
 
-const maxSecretScanBodySize int64 = 1 << 20
+const (
+	maxSecretScanBodySize int64 = 1 << 20
+	maxApprovalBodySize   int64 = 64 << 10
+)
 
 var publicIPv6GlobalUnicastPrefix = mustPrefix("2000::/3")
 
@@ -106,12 +109,18 @@ func mustPrefix(prefix string) netip.Prefix {
 }
 
 type approvalRequest struct {
-	ID      string   `json:"id"`
-	Type    string   `json:"type"`
-	Domain  string   `json:"domain"`
-	Method  string   `json:"method"`
-	Path    string   `json:"path"`
-	Secrets []string `json:"secrets"`
+	ID       string        `json:"id"`
+	Type     string        `json:"type"`
+	Domain   string        `json:"domain"`
+	Method   string        `json:"method"`
+	URL      string        `json:"url"`
+	Body     *approvalBody `json:"body,omitempty"`
+	Warnings []string      `json:"warnings"`
+	Secrets  []string      `json:"secrets"`
+}
+
+type approvalBody struct {
+	Text string `json:"text"`
 }
 
 type approvalResponse struct {
@@ -120,14 +129,17 @@ type approvalResponse struct {
 	Substitutions map[string]string `json:"substitutions,omitempty"`
 }
 
-func askForApproval(requestType, domain, method, path string, secrets []string) approvalResponse {
+func askForApproval(request approvalRequest) approvalResponse {
 	if controlUnixPath == "" {
-		log.Printf("approval denied: no control socket configured for %s %s %s %s", requestType, method, domain, path)
+		log.Printf("approval denied: no control socket configured for %s %s %s %s", request.Type, request.Method, request.Domain, request.URL)
 		return approvalResponse{Approved: false}
 	}
-
-	if secrets == nil {
-		secrets = []string{}
+	request.ID = nextApprovalRequestID()
+	if request.Secrets == nil {
+		request.Secrets = []string{}
+	}
+	if request.Warnings == nil {
+		request.Warnings = []string{}
 	}
 
 	conn, err := net.Dial("unix", controlUnixPath)
@@ -137,14 +149,6 @@ func askForApproval(requestType, domain, method, path string, secrets []string) 
 	}
 	defer conn.Close()
 
-	request := approvalRequest{
-		ID:      nextApprovalRequestID(),
-		Type:    requestType,
-		Domain:  domain,
-		Method:  method,
-		Path:    path,
-		Secrets: secrets,
-	}
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		log.Printf("approval denied: write request: %v", err)
 		return approvalResponse{Approved: false}
@@ -279,7 +283,7 @@ func connectTarget(r *http.Request) (string, string, error) {
 }
 
 func handleSSHTunnel(w http.ResponseWriter, targetHost, targetPort string) {
-	if !askForApproval("SSH", targetHost, "CONNECT", targetPort, nil).Approved {
+	if !askForApproval(approvalRequest{Type: "SSH", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort)}).Approved {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
@@ -369,7 +373,7 @@ func isBlockedDestinationAddr(addr netip.Addr) bool {
 }
 
 func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
-	if !askForApproval("CONNECT", targetHost, "", "", nil).Approved {
+	if !askForApproval(approvalRequest{Type: "CONNECT", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort)}).Approved {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
@@ -423,7 +427,16 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 			break
 		}
 
-		approval := askForApproval("REQUEST", targetHost, innerReq.Method, approvalPath(innerReq), secretNames)
+		body, warnings := approvalBodyForRequest(innerReq)
+		approval := askForApproval(approvalRequest{
+			Type:     "REQUEST",
+			Domain:   targetHost,
+			Method:   innerReq.Method,
+			URL:      approvalURL(innerReq, targetHost),
+			Body:     body,
+			Warnings: warnings,
+			Secrets:  secretNames,
+		})
 		if !approval.Approved {
 			tlsConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 			break
@@ -486,14 +499,99 @@ func tunnelRawConnections(clientConn net.Conn, clientBuffer *bufio.ReadWriter, u
 	<-done
 }
 
-func approvalPath(r *http.Request) string {
-	if r.URL == nil {
-		return ""
+func approvalURL(r *http.Request, fallbackHost string) string {
+	host := r.Host
+	if host == "" {
+		host = fallbackHost
 	}
-	if r.URL.RawQuery == "" {
-		return r.URL.Path
+	if r.RequestURI == "" {
+		text, _ := approvalDisplayBytes([]byte(host))
+		return text
 	}
-	return r.URL.Path + "?" + r.URL.RawQuery
+	text, _ := approvalDisplayBytes([]byte(host + r.RequestURI))
+	return text
+}
+
+func approvalBodyForRequest(r *http.Request) (*approvalBody, []string) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil, nil
+	}
+	warn := func(message string) (*approvalBody, []string) { return nil, []string{message} }
+	if hasExpectContinue(r) {
+		return warn("Request body uses Expect: 100-continue; body was not shown.")
+	}
+
+	body, tooLarge, err := readApprovalBody(r)
+	if err != nil {
+		return warn("Request body could not be read for approval.")
+	}
+	if len(body) == 0 {
+		return nil, nil
+	}
+	if tooLarge {
+		return warn("Request body is too large to show.")
+	}
+	if encoding := strings.TrimSpace(r.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return warn("Request body is compressed or encoded; body was not shown.")
+	}
+	if contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0])); strings.HasPrefix(contentType, "multipart/") {
+		return warn("Request body is multipart; body was not shown.")
+	}
+	text, escaped := approvalDisplayBytes(body)
+	if escaped {
+		return &approvalBody{Text: text}, []string{"Request body contains non-printable or non-ASCII bytes; showing escaped bytes."}
+	}
+	return &approvalBody{Text: text}, nil
+}
+
+func readApprovalBody(r *http.Request) ([]byte, bool, error) {
+	originalBody := r.Body
+	body, err := io.ReadAll(io.LimitReader(originalBody, maxApprovalBodySize+1))
+	tooLarge := int64(len(body)) > maxApprovalBodySize
+	if err != nil || tooLarge {
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
+		return body, tooLarge, err
+	}
+	originalBody.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, false, nil
+}
+
+func approvalDisplayBytes(data []byte) (string, bool) {
+	escape := false
+	for _, c := range data {
+		if c != '\n' && c != '\r' && c != '\t' && (c < 0x20 || c > 0x7e) {
+			escape = true
+			break
+		}
+	}
+	if !escape {
+		return string(data), false
+	}
+
+	var b strings.Builder
+	for _, c := range data {
+		switch c {
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if c >= 0x20 && c <= 0x7e {
+				b.WriteByte(c)
+			} else {
+				fmt.Fprintf(&b, `\x%02X`, c)
+			}
+		}
+	}
+	return b.String(), true
 }
 
 func findRequestSecrets(r *http.Request) ([]string, error) {

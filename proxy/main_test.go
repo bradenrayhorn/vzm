@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"net/netip"
 	"testing"
 )
@@ -73,4 +76,85 @@ func TestRejectBlockedDialDestination(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApprovalURLIncludesPathAndQuery(t *testing.T) {
+	r := &http.Request{Host: "cache.example", RequestURI: "/pkg/a%2Fb?v=1&redirect=https%3A%2F%2Fx"}
+	want := "cache.example/pkg/a%2Fb?v=1&redirect=https%3A%2F%2Fx"
+	if got := approvalURL(r, "fallback.example"); got != want {
+		t.Fatalf("approvalURL() = %q, want %q", got, want)
+	}
+}
+
+func TestApprovalURLEscapesInvisibleUnicode(t *testing.T) {
+	r := &http.Request{Host: "cache.example", RequestURI: "/x?q=\ue000\U000f0000"}
+	want := `cache.example/x?q=\xEE\x80\x80\xF3\xB0\x80\x80`
+	if got := approvalURL(r, "fallback.example"); got != want {
+		t.Fatalf("approvalURL() = %q, want %q", got, want)
+	}
+}
+
+func TestApprovalBodyForAnyMethod(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			r := approvalBodyRequest(method, []byte("hello\nworld"))
+			body, warnings := approvalBodyForRequest(r)
+			if len(warnings) != 0 || body == nil || body.Text != "hello\nworld" {
+				t.Fatalf("approvalBodyForRequest() body=%#v warnings=%v", body, warnings)
+			}
+			if got := readRequestBody(t, r); got != "hello\nworld" {
+				t.Fatalf("body after preview = %q", got)
+			}
+		})
+	}
+}
+
+func TestApprovalBodyDoesNotNeedContentLength(t *testing.T) {
+	r := approvalBodyRequest(http.MethodPost, []byte("hello"))
+	r.ContentLength = -1
+	body, warnings := approvalBodyForRequest(r)
+	if len(warnings) != 0 || body == nil || body.Text != "hello" {
+		t.Fatalf("approvalBodyForRequest() body=%#v warnings=%v", body, warnings)
+	}
+}
+
+func TestApprovalBodyWarningsRestoreBody(t *testing.T) {
+	r := approvalBodyRequest(http.MethodPost, bytes.Repeat([]byte("a"), int(maxApprovalBodySize)+1))
+	body, warnings := approvalBodyForRequest(r)
+	if body != nil || len(warnings) == 0 {
+		t.Fatalf("approvalBodyForRequest() body=%#v warnings=%v", body, warnings)
+	}
+	if got := readRequestBody(t, r); len(got) != int(maxApprovalBodySize)+1 {
+		t.Fatalf("body length after warning = %d", len(got))
+	}
+}
+
+func TestApprovalBodyEscapesInvisibleUnicode(t *testing.T) {
+	r := approvalBodyRequest(http.MethodPost, []byte("ok🙂️\ue000\U000f0000"))
+	body, warnings := approvalBodyForRequest(r)
+	want := `ok\xF0\x9F\x99\x82\xEF\xB8\x8F\xEE\x80\x80\xF3\xB0\x80\x80`
+	if body == nil || len(warnings) == 0 || body.Text != want {
+		t.Fatalf("approvalBodyForRequest() body=%#v warnings=%v", body, warnings)
+	}
+}
+
+func TestApprovalBodyEscapesInvalidUTF8(t *testing.T) {
+	r := approvalBodyRequest(http.MethodPost, []byte{0xff, 'a'})
+	body, warnings := approvalBodyForRequest(r)
+	if body == nil || len(warnings) == 0 || body.Text != `\xFFa` {
+		t.Fatalf("approvalBodyForRequest() body=%#v warnings=%v", body, warnings)
+	}
+}
+
+func approvalBodyRequest(method string, body []byte) *http.Request {
+	return &http.Request{Method: method, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body))}
+}
+
+func readRequestBody(t *testing.T, r *http.Request) string {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }

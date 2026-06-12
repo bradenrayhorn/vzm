@@ -9,6 +9,7 @@ final class ApprovalService {
         }
     }()
 
+    private static let neverSeenDomainWarning = "Warning: this VM is connecting to a domain that has not been approved before."
     private let approvedConnectDomainStore: ApprovedConnectDomainStore
 
     init(fileManager: FileManager = .default) throws {
@@ -16,11 +17,16 @@ final class ApprovalService {
     }
 
     func askForApproval(request: ProxyApprovalRequest) async -> Bool {
+        var request = request
+        let knownDomain = !request.domain.isEmpty && approvedConnectDomainStore.contains(request.domain)
+        if !request.domain.isEmpty && !knownDomain && !request.warnings.contains(Self.neverSeenDomainWarning) {
+            request.warnings.append(Self.neverSeenDomainWarning)
+        }
+
         guard request.type == "CONNECT", !request.domain.isEmpty else {
             return await ApprovalCoordinator.shared.askForApproval(request: request)
         }
-
-        if approvedConnectDomainStore.contains(request.domain) {
+        if knownDomain {
             return true
         }
 

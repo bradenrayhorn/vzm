@@ -219,12 +219,18 @@ final class ProxyService {
 }
 
 struct ProxyApprovalRequest: Codable, Sendable {
-    let id: String
-    let type: String
-    let domain: String
-    let method: String
-    let path: String
-    let secrets: [String]
+    var id: String
+    var type: String
+    var domain: String
+    var method: String
+    var url: String
+    var body: ProxyApprovalBody?
+    var warnings: [String]
+    var secrets: [String]
+}
+
+struct ProxyApprovalBody: Codable, Sendable {
+    var text: String
 }
 
 private struct ProxyApprovalResponse: Codable, Sendable {

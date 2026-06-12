@@ -16,6 +16,7 @@ final class ApprovedConnectDomainStore {
     }
 
     func contains(_ domain: String) -> Bool {
+        let domain = Self.normalize(domain)
         guard !domain.isEmpty else {
             return false
         }
@@ -24,6 +25,7 @@ final class ApprovedConnectDomainStore {
     }
 
     func insert(_ domain: String) throws {
+        let domain = Self.normalize(domain)
         guard !domain.isEmpty else {
             return
         }
@@ -61,5 +63,13 @@ final class ApprovedConnectDomainStore {
         SHA256.hash(data: Data(domain.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+
+    private static func normalize(_ domain: String) -> String {
+        var domain = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if domain.hasSuffix(".") {
+            domain.removeLast()
+        }
+        return domain
     }
 }
