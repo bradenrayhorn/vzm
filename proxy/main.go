@@ -17,6 +17,8 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
+	"os/signal"
 	"regexp"
 	"slices"
 	"strconv"
@@ -52,11 +54,23 @@ func newOutboundTransport() *http.Transport {
 	return transport
 }
 
-var secretPattern = regexp.MustCompile(`\{vzm:([^}]+)\}`)
+var (
+	secretPattern  = regexp.MustCompile(`\{vzm:([^}]+)\}`)
+	gitHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
+	gitRepoPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*)+$`)
+)
 
 const (
-	maxSecretScanBodySize int64 = 1 << 20
-	maxApprovalBodySize   int64 = 64 << 10
+	maxSecretScanBodySize  int64 = 1 << 20
+	maxApprovalBodySize    int64 = 64 << 10
+	maxGitProxyConnections       = 32
+	gitIntentReadTimeout         = 10 * time.Second
+	gitErrorWriteTimeout         = 2 * time.Second
+)
+
+var (
+	gitProxySlots = make(chan struct{}, maxGitProxyConnections)
+	shutdownCtx   = context.Background()
 )
 
 var publicIPv6GlobalUnicastPrefix = mustPrefix("2000::/3")
@@ -182,14 +196,19 @@ func nextApprovalRequestID() string {
 
 func main() {
 	listenUnixPath := flag.String("listen-unix", "", "Unix domain socket path for the proxy listener")
+	gitListenUnixPath := flag.String("git-listen-unix", "", "Unix domain socket path for the Git proxy listener")
 	listenTCPAddr := flag.String("listen-tcp", ":26604", "TCP address for the proxy listener when --listen-unix is not set")
 	caCertPath := flag.String("ca-cert", "", "Path to write the MITM CA certificate PEM")
 	parentPID := flag.Int("parent-pid", 0, "PID of the parent vzm process; exit if it disappears")
 	flag.StringVar(&controlUnixPath, "control-unix", "", "Unix domain socket path for approval requests")
 	flag.Parse()
 
+	var stop context.CancelFunc
+	shutdownCtx, stop = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if *parentPID > 0 {
-		go exitWhenParentDisappears(*parentPID)
+		go exitWhenParentDisappears(stop, *parentPID)
 	}
 
 	pemPath := *caCertPath
@@ -213,11 +232,34 @@ func main() {
 		defer os.Remove(*listenUnixPath)
 	}
 
+	if *gitListenUnixPath != "" {
+		gitListener, err := listen(*gitListenUnixPath, "")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer gitListener.Close()
+		defer os.Remove(*gitListenUnixPath)
+
+		go func() {
+			if err := serveGit(gitListener); err != nil && shutdownCtx.Err() == nil && !errors.Is(err, net.ErrClosed) {
+				log.Printf("git proxy listener failed: %v", err)
+				stop()
+			}
+		}()
+	}
+
 	server := &http.Server{
 		Handler: http.HandlerFunc(handleProxy),
 	}
+	go func() {
+		<-shutdownCtx.Done()
+		_ = listener.Close()
+	}()
+
 	log.Printf("proxy listening on %s", listener.Addr())
-	log.Fatal(server.Serve(listener))
+	if err := server.Serve(listener); err != nil && shutdownCtx.Err() == nil && !errors.Is(err, net.ErrClosed) {
+		log.Fatal(err)
+	}
 }
 
 func listen(unixPath, tcpAddr string) (net.Listener, error) {
@@ -237,16 +279,223 @@ func listen(unixPath, tcpAddr string) (net.Listener, error) {
 	return listener, nil
 }
 
-func exitWhenParentDisappears(parentPID int) {
+type gitProxyIntent struct {
+	Host    string
+	Command string
+	Repo    string
+}
+
+func (g gitProxyIntent) method() string {
+	if g.Command == "git-receive-pack" {
+		return "PUSH"
+	}
+	return "FETCH"
+}
+
+func serveGit(listener net.Listener) error {
+	log.Printf("git proxy listening on %s", listener.Addr())
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+
+		select {
+		case gitProxySlots <- struct{}{}:
+			go func() {
+				defer func() { <-gitProxySlots }()
+				handleGitProxyConnection(conn)
+			}()
+		default:
+			writeGitError(conn, "too many concurrent Git connections")
+			conn.Close()
+		}
+	}
+}
+
+func handleGitProxyConnection(conn net.Conn) {
+	defer conn.Close()
+
+	_ = conn.SetReadDeadline(time.Now().Add(gitIntentReadTimeout))
+	intent, err := readGitProxyIntent(conn)
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		writeGitError(conn, err.Error())
+		return
+	}
+
+	approval := askForApproval(approvalRequest{
+		Type:   "GIT",
+		Domain: intent.Host,
+		Method: intent.method(),
+		URL:    fmt.Sprintf("git@%s:%s", intent.Host, intent.Repo),
+	})
+	if !approval.Approved {
+		writeGitError(conn, "Denied by host")
+		return
+	}
+
+	if err := runGitSSH(conn, intent); err != nil && shutdownCtx.Err() == nil {
+		log.Printf("git proxy failed for git@%s:%s: %v", intent.Host, intent.Repo, err)
+	}
+}
+
+func readGitProxyIntent(conn net.Conn) (gitProxyIntent, error) {
+	payload, err := readGitPktLine(conn, 4096)
+	if err != nil {
+		return gitProxyIntent{}, err
+	}
+
+	request, _, ok := bytes.Cut(payload, []byte{0})
+	if !ok {
+		return gitProxyIntent{}, fmt.Errorf("invalid Git request")
+	}
+	command, path, ok := strings.Cut(string(request), " ")
+	if !ok || (command != "git-upload-pack" && command != "git-receive-pack") {
+		return gitProxyIntent{}, fmt.Errorf("unsupported Git operation")
+	}
+
+	host, repo, err := parseGitProxyPath(path)
+	if err != nil {
+		return gitProxyIntent{}, err
+	}
+	return gitProxyIntent{Host: host, Command: command, Repo: repo}, nil
+}
+
+func readGitPktLine(reader io.Reader, maxPayloadSize int) ([]byte, error) {
+	var header [4]byte
+	if _, err := io.ReadFull(reader, header[:]); err != nil {
+		return nil, fmt.Errorf("read Git request: %w", err)
+	}
+	length, err := strconv.ParseInt(string(header[:]), 16, 32)
+	if err != nil || length < 4 {
+		return nil, fmt.Errorf("invalid Git pkt-line")
+	}
+	payloadSize := int(length) - 4
+	if payloadSize > maxPayloadSize {
+		return nil, fmt.Errorf("Git request is too large")
+	}
+	payload := make([]byte, payloadSize)
+	_, err = io.ReadFull(reader, payload)
+	return payload, err
+}
+
+func validGitHost(host string) bool {
+	return len(host) <= 253 && strings.ContainsAny(host, "abcdefghijklmnopqrstuvwxyz") && gitHostPattern.MatchString(host)
+}
+
+func parseGitProxyPath(path string) (string, string, error) {
+	if !strings.HasPrefix(path, "/") {
+		return "", "", fmt.Errorf("invalid Git repository path")
+	}
+	host, repo, ok := strings.Cut(strings.TrimPrefix(path, "/"), ":")
+	if !ok || strings.ContainsAny(repo, "\x00\r\n\t") {
+		return "", "", fmt.Errorf("invalid Git repository path")
+	}
+
+	host = normalizeDomain(host)
+	if !validGitHost(host) {
+		return "", "", fmt.Errorf("invalid Git host")
+	}
+	if !gitRepoPattern.MatchString(repo) {
+		return "", "", fmt.Errorf("invalid Git repository path")
+	}
+	return host, repo, nil
+}
+
+type fileConn interface {
+	File() (*os.File, error)
+}
+
+func runGitSSH(conn net.Conn, intent gitProxyIntent) error {
+	addr, err := resolvePublicGitAddr(intent.Host)
+	if err != nil {
+		return err
+	}
+
+	socketConn, ok := conn.(fileConn)
+	if !ok {
+		return fmt.Errorf("Git proxy connection does not expose a file descriptor")
+	}
+	socketFile, err := socketConn.File()
+	if err != nil {
+		return err
+	}
+	defer socketFile.Close()
+
+	cmd := exec.CommandContext(shutdownCtx, "/usr/bin/ssh", gitSSHArguments(intent, addr)...)
+	cmd.Stdin = socketFile
+	cmd.Stdout = socketFile
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func resolvePublicGitAddr(host string) (string, error) {
+	ctx, cancel := context.WithTimeout(shutdownCtx, 15*time.Second)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return "", err
+	}
+	for _, addr := range addrs {
+		addr = addr.Unmap()
+		if isAllowedDestinationAddr(addr) {
+			return addr.String(), nil
+		}
+	}
+	return "", fmt.Errorf("%w: %s", errBlockedDestination, host)
+}
+
+func gitSSHArguments(intent gitProxyIntent, addr string) []string {
+	arguments := []string{
+		"-F", "/dev/null", "-T",
+		"-o", "BatchMode=yes",
+		"-o", "CheckHostIP=no",
+		"-o", "ClearAllForwardings=yes",
+		"-o", "ConnectTimeout=15",
+		"-o", "ForwardAgent=no",
+		"-o", "HostKeyAlias=" + intent.Host,
+		"-o", "HostName=" + addr,
+		"-o", "PermitLocalCommand=no",
+		"-o", "ProxyCommand=none",
+		"-o", "RequestTTY=no",
+		"-o", "ServerAliveCountMax=3",
+		"-o", "ServerAliveInterval=30",
+		"-o", "StrictHostKeyChecking=yes",
+		"-p", "22", "-l", "git",
+	}
+	if identityAgent := strings.TrimSpace(os.Getenv("VZM_GIT_SSH_IDENTITY_AGENT")); identityAgent != "" {
+		arguments = append(arguments, "-o", "IdentityAgent="+identityAgent)
+	}
+	return append(arguments,
+		intent.Host,
+		fmt.Sprintf("%s '%s'", intent.Command, intent.Repo),
+	)
+}
+
+func writeGitError(conn net.Conn, message string) {
+	_ = conn.SetWriteDeadline(time.Now().Add(gitErrorWriteTimeout))
+	payload := []byte("ERR vzm git: " + message + "\n")
+	length := len(payload) + 4
+	if length > 0xffff {
+		return
+	}
+	_, _ = fmt.Fprintf(conn, "%04x%s", length, payload)
+}
+
+func exitWhenParentDisappears(cancel func(), parentPID int) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		if os.Getppid() != parentPID {
-			os.Exit(0)
+			cancel()
+			return
 		}
 		if err := syscall.Kill(parentPID, 0); err != nil {
-			os.Exit(0)
+			cancel()
+			return
 		}
 	}
 }
@@ -264,8 +513,6 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch targetPort {
-	case "22":
-		handleSSHTunnel(w, targetHost, targetPort, approvalHeadersForRequest(r))
 	case "443":
 		handleHTTPSConnect(w, targetHost, targetPort, approvalHeadersForRequest(r))
 	default:
@@ -289,46 +536,6 @@ func connectTarget(r *http.Request) (string, string, error) {
 		return "", "", fmt.Errorf("invalid host or port")
 	}
 	return host, port, nil
-}
-
-func handleSSHTunnel(w http.ResponseWriter, targetHost, targetPort string, headers []approvalHeader) {
-	if !askForApproval(approvalRequest{Type: "SSH", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort), Headers: headers}).Approved {
-		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
-		return
-	}
-
-	upstreamConn, err := dialPublicTCP(targetHost, targetPort)
-	if err != nil {
-		log.Printf("SSH tunnel dial failed for %s:%s: %v", targetHost, targetPort, err)
-		if errors.Is(err, errBlockedDestination) {
-			http.Error(w, "Destination not allowed", http.StatusForbidden)
-		} else {
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		}
-		return
-	}
-	defer upstreamConn.Close()
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-	clientConn, clientBuffer, err := hijacker.Hijack()
-	if err != nil {
-		return
-	}
-	defer clientConn.Close()
-
-	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		return
-	}
-
-	tunnelRawConnections(clientConn, clientBuffer, upstreamConn)
-}
-
-func dialPublicTCP(host, port string) (net.Conn, error) {
-	return dialPublicTCPContext(context.Background(), "tcp", net.JoinHostPort(host, port))
 }
 
 func dialPublicTCPContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -494,19 +701,6 @@ func hostHeaderMatches(header, targetHost, targetPort string) bool {
 	// Host headers often omit the default HTTPS port.
 	host = strings.Trim(strings.TrimSpace(header), "[]")
 	return normalizeDomain(host) == targetHost
-}
-
-func tunnelRawConnections(clientConn net.Conn, clientBuffer *bufio.ReadWriter, upstreamConn net.Conn) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(upstreamConn, clientBuffer)
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(clientConn, upstreamConn)
-		done <- struct{}{}
-	}()
-	<-done
 }
 
 func approvalURL(r *http.Request, fallbackHost string) string {

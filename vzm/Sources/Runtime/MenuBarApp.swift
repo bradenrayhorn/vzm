@@ -95,32 +95,75 @@ struct PortExposureControls: View {
 
 @Observable
 @MainActor
-class ApprovalCoordinator {
+class ApprovalCoordinator: NSObject, NSWindowDelegate {
     static let shared = ApprovalCoordinator()
-    
+
     var pendingRequest: ProxyApprovalRequest? = nil
-    
-    private var activeContinuation: CheckedContinuation<Bool, Never>?
+
+    private struct QueuedApproval {
+        let request: ProxyApprovalRequest
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    private let maxPendingApprovals = 64
+    private var activeApproval: QueuedApproval?
+    private var queuedApprovals: [QueuedApproval] = []
     private var popupWindow: NSWindow?
-    
+
     func askForApproval(request: ProxyApprovalRequest) async -> Bool {
-        return await withCheckedContinuation { continuation in
-            self.activeContinuation = continuation
-            self.pendingRequest = request
-            self.showPopupWindow()
+        await withCheckedContinuation { continuation in
+            let pendingCount = queuedApprovals.count + (activeApproval == nil ? 0 : 1)
+            guard pendingCount < maxPendingApprovals else {
+                continuation.resume(returning: false)
+                return
+            }
+
+            queuedApprovals.append(QueuedApproval(request: request, continuation: continuation))
+            showNextApprovalIfIdle()
         }
     }
-    
+
     func resolve(approved: Bool) {
-        activeContinuation?.resume(returning: approved)
-        
-        activeContinuation = nil
-        pendingRequest = nil
-        
-        popupWindow?.close()
-        popupWindow = nil
+        finishActiveApproval(approved: approved, closeWindow: true)
     }
-    
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender === popupWindow, activeApproval != nil {
+            finishActiveApproval(approved: false, closeWindow: false)
+        }
+        return true
+    }
+
+    private func finishActiveApproval(approved: Bool, closeWindow: Bool) {
+        guard let activeApproval else {
+            return
+        }
+
+        let continuation = activeApproval.continuation
+        let windowToClose = popupWindow
+        self.activeApproval = nil
+        pendingRequest = nil
+        popupWindow = nil
+
+        if closeWindow {
+            windowToClose?.delegate = nil
+            windowToClose?.close()
+        }
+
+        continuation.resume(returning: approved)
+        showNextApprovalIfIdle()
+    }
+
+    private func showNextApprovalIfIdle() {
+        guard activeApproval == nil, !queuedApprovals.isEmpty else {
+            return
+        }
+
+        activeApproval = queuedApprovals.removeFirst()
+        pendingRequest = activeApproval?.request
+        showPopupWindow()
+    }
+
     private func showPopupWindow() {
         guard let request = self.pendingRequest else { return }
         let promptView = ApprovalPromptView(request: request) { [weak self] approved in
@@ -141,6 +184,7 @@ class ApprovalCoordinator {
             defer: false
         )
         
+        panel.delegate = self
         panel.titlebarAppearsTransparent = true
         panel.titleVisibility = .hidden
         panel.isMovableByWindowBackground = true

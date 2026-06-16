@@ -125,6 +125,42 @@ func TestApprovalHeadersForRequest(t *testing.T) {
 	}
 }
 
+func TestParseGitProxyPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		wantHost string
+		wantRepo string
+		wantErr  bool
+	}{
+		{name: "github", path: "/github.com:owner/repo.git", wantHost: "github.com", wantRepo: "owner/repo.git"},
+		{name: "gitlab nested", path: "/gitlab.com:group/subgroup/project.git", wantHost: "gitlab.com", wantRepo: "group/subgroup/project.git"},
+		{name: "azure", path: "/ssh.dev.azure.com:v3/org/project/repo", wantHost: "ssh.dev.azure.com", wantRepo: "v3/org/project/repo"},
+		{name: "normalizes host", path: "/GitHub.COM.:owner/repo.git", wantHost: "github.com", wantRepo: "owner/repo.git"},
+		{name: "rejects ssh url path", path: "/github.com/owner/repo.git", wantErr: true},
+		{name: "rejects single segment repo", path: "/github.com:repo.git", wantErr: true},
+		{name: "rejects newline", path: "/github.com:owner/repo.git\n", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host, repo, err := parseGitProxyPath(tt.path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseGitProxyPath() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseGitProxyPath() unexpected error: %v", err)
+			}
+			if host != tt.wantHost || repo != tt.wantRepo {
+				t.Fatalf("parseGitProxyPath() = %q, %q; want %q, %q", host, repo, tt.wantHost, tt.wantRepo)
+			}
+		})
+	}
+}
+
 func TestApprovalBodyForAnyMethod(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {

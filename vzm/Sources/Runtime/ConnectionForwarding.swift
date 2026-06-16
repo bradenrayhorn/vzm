@@ -36,6 +36,15 @@ final class ForwardingHandler: ChannelInboundHandler {
         context.fireChannelWritabilityChanged()
     }
 
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if case ChannelEvent.inputClosed = event {
+            peer?.flush()
+            peer?.close(mode: .output, promise: nil)
+            return
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+
     func channelInactive(context: ChannelHandlerContext) {
         peer?.close(promise: nil)
         context.fireChannelInactive()
@@ -48,9 +57,13 @@ final class ForwardingHandler: ChannelInboundHandler {
 }
 
 func bridge(_ first: Channel, _ second: Channel, initialBytesToSecond initialBytes: [UInt8] = []) -> EventLoopFuture<Void> {
-    first.pipeline.addHandler(ForwardingHandler(peer: second)).and(
-        second.pipeline.addHandler(ForwardingHandler(peer: first))
+    first.setOption(ChannelOptions.allowRemoteHalfClosure, value: true).and(
+        second.setOption(ChannelOptions.allowRemoteHalfClosure, value: true)
     ).flatMap { _ in
+        first.pipeline.addHandler(ForwardingHandler(peer: second)).and(
+            second.pipeline.addHandler(ForwardingHandler(peer: first))
+        )
+    }.flatMap { _ in
         writeInitialBytes(initialBytes, to: second)
     }.flatMap { _ in
         first.setOption(ChannelOptions.autoRead, value: true).and(
