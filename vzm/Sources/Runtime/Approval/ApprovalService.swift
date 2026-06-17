@@ -1,6 +1,6 @@
 import Foundation
 
-final class ApprovalService {
+actor ApprovalService {
     static let shared: ApprovalService = {
         do {
             return try ApprovalService()
@@ -32,7 +32,7 @@ final class ApprovalService {
         
         var warnings: [String] = []
 
-        if let bodyWarning = request.body?.warning {
+        if let bodyWarning = request.body?.warning, !bodyWarning.isEmpty {
             warnings.append(bodyWarning)
         }
 
