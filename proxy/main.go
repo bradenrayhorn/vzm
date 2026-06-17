@@ -123,15 +123,14 @@ func mustPrefix(prefix string) netip.Prefix {
 }
 
 type approvalRequest struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
-	Domain   string           `json:"domain"`
-	Method   string           `json:"method"`
-	URL      string           `json:"url"`
-	Headers  []approvalHeader `json:"headers"`
-	Body     *approvalBody    `json:"body,omitempty"`
-	Warnings []string         `json:"warnings"`
-	Secrets  []string         `json:"secrets"`
+	ID      string           `json:"id"`
+	Type    string           `json:"type"`
+	Domain  string           `json:"domain"`
+	Method  string           `json:"method"`
+	URL     string           `json:"url"`
+	Headers []approvalHeader `json:"headers"`
+	Body    *approvalBody    `json:"body,omitempty"`
+	Secrets []string         `json:"secrets"`
 }
 
 type approvalHeader struct {
@@ -140,7 +139,8 @@ type approvalHeader struct {
 }
 
 type approvalBody struct {
-	Text string `json:"text"`
+	Text    string `json:"text"`
+	Warning string `json:"warning"`
 }
 
 type approvalResponse struct {
@@ -160,9 +160,6 @@ func askForApproval(request approvalRequest) approvalResponse {
 	}
 	if request.Secrets == nil {
 		request.Secrets = []string{}
-	}
-	if request.Warnings == nil {
-		request.Warnings = []string{}
 	}
 
 	conn, err := net.Dial("unix", controlUnixPath)
@@ -514,7 +511,7 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	switch targetPort {
 	case "443":
-		handleHTTPSConnect(w, targetHost, targetPort, approvalHeadersForRequest(r))
+		handleHTTPSConnect(w, targetHost, targetPort)
 	default:
 		log.Printf("blocked CONNECT to unsupported port %s for %s", targetPort, targetHost)
 		http.Error(w, "CONNECT port not allowed", http.StatusForbidden)
@@ -588,8 +585,8 @@ func isBlockedDestinationAddr(addr netip.Addr) bool {
 	return false
 }
 
-func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string, headers []approvalHeader) {
-	if !askForApproval(approvalRequest{Type: "CONNECT", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort), Headers: headers}).Approved {
+func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
+	if !askForApproval(approvalRequest{Type: "CONNECT", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort)}).Approved {
 		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
 		return
 	}
@@ -643,16 +640,15 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string, he
 			break
 		}
 
-		body, warnings := approvalBodyForRequest(innerReq)
+		reqURL, _ := approvalDisplayBytes([]byte(targetHost + innerReq.RequestURI))
 		approval := askForApproval(approvalRequest{
-			Type:     "REQUEST",
-			Domain:   targetHost,
-			Method:   innerReq.Method,
-			URL:      approvalURL(innerReq, targetHost),
-			Headers:  approvalHeadersForRequest(innerReq),
-			Body:     body,
-			Warnings: warnings,
-			Secrets:  secretNames,
+			Type:    "REQUEST",
+			Domain:  targetHost,
+			Method:  innerReq.Method,
+			URL:     reqURL,
+			Headers: approvalHeadersForRequest(innerReq),
+			Body:    approvalBodyForRequest(innerReq),
+			Secrets: secretNames,
 		})
 		if !approval.Approved {
 			tlsConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
@@ -703,19 +699,6 @@ func hostHeaderMatches(header, targetHost, targetPort string) bool {
 	return normalizeDomain(host) == targetHost
 }
 
-func approvalURL(r *http.Request, fallbackHost string) string {
-	host := r.Host
-	if host == "" {
-		host = fallbackHost
-	}
-	if r.RequestURI == "" {
-		text, _ := approvalDisplayBytes([]byte(host))
-		return text
-	}
-	text, _ := approvalDisplayBytes([]byte(host + r.RequestURI))
-	return text
-}
-
 func approvalHeadersForRequest(r *http.Request) []approvalHeader {
 	if r == nil {
 		return nil
@@ -755,11 +738,15 @@ func approvalHeaderForDisplay(name, value string) approvalHeader {
 	return approvalHeader{Name: displayName, Value: displayValue}
 }
 
-func approvalBodyForRequest(r *http.Request) (*approvalBody, []string) {
+func approvalBodyForRequest(r *http.Request) *approvalBody {
 	if r.Body == nil || r.Body == http.NoBody {
-		return nil, nil
+		return nil
 	}
-	warn := func(message string) (*approvalBody, []string) { return nil, []string{message} }
+
+	warn := func(message string) *approvalBody {
+		return &approvalBody{Warning: message}
+	}
+
 	if hasExpectContinue(r) {
 		return warn("Request body uses Expect: 100-continue; body was not shown.")
 	}
@@ -768,12 +755,14 @@ func approvalBodyForRequest(r *http.Request) (*approvalBody, []string) {
 	if err != nil {
 		return warn("Request body could not be read for approval.")
 	}
-	if len(body) == 0 {
-		return nil, nil
-	}
 	if tooLarge {
 		return warn("Request body is too large to show.")
 	}
+
+	if len(body) == 0 {
+		return nil
+	}
+
 	if encoding := strings.TrimSpace(r.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
 		return warn("Request body is compressed or encoded; body was not shown.")
 	}
@@ -781,10 +770,13 @@ func approvalBodyForRequest(r *http.Request) (*approvalBody, []string) {
 		return warn("Request body is multipart; body was not shown.")
 	}
 	text, escaped := approvalDisplayBytes(body)
-	if escaped {
-		return &approvalBody{Text: text}, []string{"Request body contains non-printable or non-ASCII bytes; showing escaped bytes."}
+	approval := &approvalBody{
+		Text: text,
 	}
-	return &approvalBody{Text: text}, nil
+	if escaped {
+		approval.Warning = "Request body contains non-printable or non-ASCII bytes; showing escaped bytes."
+	}
+	return approval
 }
 
 func readApprovalBody(r *http.Request) ([]byte, bool, error) {

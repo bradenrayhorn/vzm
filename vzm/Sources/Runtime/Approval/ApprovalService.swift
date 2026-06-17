@@ -29,9 +29,15 @@ final class ApprovalService {
         let knownDomain = !request.domain.isEmpty && recognizedElementStore.contains(request.domain, type: .domain)
         let userAgent = ApprovalHeaderMasker.getUserAgent(for: request)
         let isKnownUserAgent = !userAgent.isEmpty && recognizedElementStore.contains(userAgent, type: .userAgent)
+        
+        var warnings: [String] = []
 
-        if !request.domain.isEmpty && !knownDomain && !request.warnings.contains(Self.neverSeenDomainWarning) {
-            request.warnings.append(Self.neverSeenDomainWarning)
+        if let bodyWarning = request.body?.warning {
+            warnings.append(bodyWarning)
+        }
+
+        if !request.domain.isEmpty && !knownDomain {
+            warnings.append(Self.neverSeenDomainWarning)
         }
 
         // short-circuit if domain is known and it is a CONNECT
@@ -59,7 +65,8 @@ final class ApprovalService {
         let approved = await ApprovalCoordinator.shared.askForApproval(
             request: ApprovalCoordinatorRequest(
                 proxy: request,
-                engineRequest: selectedEngine.map { ApprovalEngineRequest(name: $0.name) }
+                engineRequest: selectedEngine.map { ApprovalEngineRequest(name: $0.name) },
+                warnings: warnings,
             )
         )
         let isApproved = approved == .approveEngine || approved == .approvedOnce

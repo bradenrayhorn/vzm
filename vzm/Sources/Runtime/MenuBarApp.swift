@@ -100,6 +100,7 @@ struct ApprovalEngineRequest: Codable, Sendable {
 struct ApprovalCoordinatorRequest: Codable, Sendable {
     let proxy: ProxyApprovalRequest
     let engineRequest: ApprovalEngineRequest?
+    var warnings: [String]
 }
 
 enum ApprovalCoordinatorResult {
@@ -225,9 +226,9 @@ struct ApprovalPromptView: View {
                 Text(request.proxy.domain)
                     .font(.body.bold())
 
-                if !request.proxy.warnings.isEmpty {
+                if !request.warnings.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(request.proxy.warnings, id: \.self) { warning in
+                        ForEach(request.warnings, id: \.self) { warning in
                             Text("⚠️ \(warning)")
                                 .foregroundStyle(.orange)
                                 .textSelection(.enabled)

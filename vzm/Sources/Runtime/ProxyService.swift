@@ -246,7 +246,6 @@ struct ProxyApprovalRequest: Codable, Sendable {
     var url: String
     var headers: [ProxyApprovalHeader]
     var body: ProxyApprovalBody?
-    var warnings: [String]
     var secrets: [String]
 }
 
@@ -257,6 +256,7 @@ struct ProxyApprovalHeader: Codable, Sendable, Equatable {
 
 struct ProxyApprovalBody: Codable, Sendable {
     var text: String
+    var warning: String
 }
 
 private struct ProxyApprovalResponse: Codable, Sendable {

@@ -188,7 +188,7 @@ func TestApprovalBodyDoesNotNeedContentLength(t *testing.T) {
 func TestApprovalBodyWarningsRestoreBody(t *testing.T) {
 	r := approvalBodyRequest(http.MethodPost, bytes.Repeat([]byte("a"), int(maxApprovalBodySize)+1))
 	body, warnings := approvalBodyForRequest(r)
-	if body != nil || len(warnings) == 0 {
+	if body == nil || len(warnings) == 0 || body.Warning == "" || body.Text != "" {
 		t.Fatalf("approvalBodyForRequest() body=%#v warnings=%v", body, warnings)
 	}
 	if got := readRequestBody(t, r); len(got) != int(maxApprovalBodySize)+1 {

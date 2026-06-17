@@ -27,7 +27,7 @@ final class NixCacheApprovalEngine: BaseApprovalEngine {
         guard request.secrets.isEmpty else {
             return .unknown
         }
-        guard request.body == nil else { // TODO- need to fix body
+        guard request.body == nil else {
             return .unknown
         }
         guard request.method == "GET" else {
