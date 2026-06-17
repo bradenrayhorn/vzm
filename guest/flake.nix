@@ -6,14 +6,14 @@
   };
 
   outputs =
-    { nixpkgs, ... }:
+    { self, nixpkgs, ... }:
     let
       system = "aarch64-linux";
       pkgs = import nixpkgs { inherit system; };
 
       vm = nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = [ ./configuration.nix ];
+        modules = [ self.nixosModules.default ];
       };
 
       rootfsImage = pkgs.callPackage "${nixpkgs}/nixos/lib/make-squashfs.nix" {
@@ -56,6 +56,12 @@
       '';
     in
     {
+      nixosModules = {
+        base = import ./base.nix;
+        braden = import ./braden.nix;
+        default = import ./configuration.nix;
+      };
+
       nixosConfigurations = {
         vm = vm;
       };
