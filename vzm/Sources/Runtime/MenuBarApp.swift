@@ -93,16 +93,29 @@ struct PortExposureControls: View {
     }
 }
 
+struct ApprovalEngineRequest: Codable, Sendable {
+    let name: String
+}
+
+struct ApprovalCoordinatorRequest: Codable, Sendable {
+    let proxy: ProxyApprovalRequest
+    let engineRequest: ApprovalEngineRequest?
+}
+
+enum ApprovalCoordinatorResult {
+    case approvedOnce
+    case approveEngine
+    case denied
+}
+
 @Observable
 @MainActor
 class ApprovalCoordinator: NSObject, NSWindowDelegate {
     static let shared = ApprovalCoordinator()
 
-    var pendingRequest: ProxyApprovalRequest? = nil
-
     private struct QueuedApproval {
-        let request: ProxyApprovalRequest
-        let continuation: CheckedContinuation<Bool, Never>
+        let request: ApprovalCoordinatorRequest
+        let continuation: CheckedContinuation<ApprovalCoordinatorResult, Never>
     }
 
     private let maxPendingApprovals = 64
@@ -110,11 +123,11 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
     private var queuedApprovals: [QueuedApproval] = []
     private var popupWindow: NSWindow?
 
-    func askForApproval(request: ProxyApprovalRequest) async -> Bool {
+    func askForApproval(request: ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult {
         await withCheckedContinuation { continuation in
             let pendingCount = queuedApprovals.count + (activeApproval == nil ? 0 : 1)
             guard pendingCount < maxPendingApprovals else {
-                continuation.resume(returning: false)
+                continuation.resume(returning: .denied)
                 return
             }
 
@@ -123,18 +136,14 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
         }
     }
 
-    func resolve(approved: Bool) {
-        finishActiveApproval(approved: approved, closeWindow: true)
-    }
-
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === popupWindow, activeApproval != nil {
-            finishActiveApproval(approved: false, closeWindow: false)
+            finishActiveApproval(result: .denied, closeWindow: false)
         }
         return true
     }
 
-    private func finishActiveApproval(approved: Bool, closeWindow: Bool) {
+    private func finishActiveApproval(result: ApprovalCoordinatorResult, closeWindow: Bool) {
         guard let activeApproval else {
             return
         }
@@ -142,7 +151,6 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
         let continuation = activeApproval.continuation
         let windowToClose = popupWindow
         self.activeApproval = nil
-        pendingRequest = nil
         popupWindow = nil
 
         if closeWindow {
@@ -150,7 +158,7 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
             windowToClose?.close()
         }
 
-        continuation.resume(returning: approved)
+        continuation.resume(returning: result)
         showNextApprovalIfIdle()
     }
 
@@ -160,14 +168,13 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
         }
 
         activeApproval = queuedApprovals.removeFirst()
-        pendingRequest = activeApproval?.request
         showPopupWindow()
     }
 
     private func showPopupWindow() {
-        guard let request = self.pendingRequest else { return }
-        let promptView = ApprovalPromptView(request: request) { [weak self] approved in
-            self?.resolve(approved: approved)
+        guard let request = self.activeApproval?.request else { return }
+        let promptView = ApprovalPromptView(request: request) { [weak self] result in
+            self?.finishActiveApproval(result: result, closeWindow: true)
         }
         
         let hostingController = NSHostingController(rootView: promptView)
@@ -201,11 +208,11 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
 }
 
 struct ApprovalPromptView: View {
-    let request: ProxyApprovalRequest
-    let onResolve: (Bool) -> Void
+    let request: ApprovalCoordinatorRequest
+    let onResolve: (ApprovalCoordinatorResult) -> Void
 
     private var headerText: String {
-        request.headers.map { "\($0.name): \($0.value)" }.joined(separator: "\n")
+        request.proxy.headers.map { "\($0.name): \($0.value)" }.joined(separator: "\n")
     }
     
     var body: some View {
@@ -214,13 +221,13 @@ struct ApprovalPromptView: View {
                 .font(.headline)
             
             VStack(spacing: 8) {
-                Text(request.type)
-                Text(request.domain)
+                Text(request.proxy.type)
+                Text(request.proxy.domain)
                     .font(.body.bold())
 
-                if !request.warnings.isEmpty {
+                if !request.proxy.warnings.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(request.warnings, id: \.self) { warning in
+                        ForEach(request.proxy.warnings, id: \.self) { warning in
                             Text("⚠️ \(warning)")
                                 .foregroundStyle(.orange)
                                 .textSelection(.enabled)
@@ -228,17 +235,21 @@ struct ApprovalPromptView: View {
                     }
                 }
 
+                if let engine = request.engineRequest {
+                    Text("🚂 available engine: \(engine.name)")
+                }
+
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(request.method)
+                    Text(request.proxy.method)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(request.url)
+                    Text(request.proxy.url)
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                if !request.headers.isEmpty {
+                if !request.proxy.headers.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Headers")
                             .font(.caption)
@@ -253,7 +264,7 @@ struct ApprovalPromptView: View {
                     }
                 }
 
-                if let body = request.body {
+                if let body = request.proxy.body {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Body")
                             .font(.caption)
@@ -268,12 +279,12 @@ struct ApprovalPromptView: View {
                     }
                 }
 
-                if !request.secrets.isEmpty {
+                if !request.proxy.secrets.isEmpty {
                     VStack(spacing: 4) {
                         Text("Secrets")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(request.secrets.joined(separator: ", "))
+                        Text(request.proxy.secrets.joined(separator: ", "))
                             .font(.body)
                             .multilineTextAlignment(.center)
                     }
@@ -283,18 +294,25 @@ struct ApprovalPromptView: View {
             
             HStack(spacing: 20) {
                 Button("❌ Deny") {
-                    onResolve(false)
+                    onResolve(.denied)
                 }
                 .keyboardShortcut(.cancelAction)
+
+                if request.engineRequest != nil {
+                    Button("🚂 Approve engine") {
+                        onResolve(.approveEngine)
+                    }
+                    .keyboardShortcut(.return, modifiers: [.option])
+                }
                 
                 Button("✅ Approve") {
-                    onResolve(true)
+                    onResolve(.approvedOnce)
                 }
                 .keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
-        .frame(minWidth: 360, idealWidth: 480, maxWidth: 900)
+        .frame(minWidth: 460, idealWidth: 520, maxWidth: 900)
         .fixedSize(horizontal: false, vertical: true)
     }
 }
