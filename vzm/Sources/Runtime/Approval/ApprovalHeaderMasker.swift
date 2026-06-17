@@ -16,21 +16,21 @@ enum ApprovalHeaderMasker {
 
     private static let safeEncodings: Set<String> = ["zstd", "br", "gzip", "deflate", "bzip2", "xz"]
 
-    static func maskSafeHeaders(for request: ProxyApprovalRequest, isKnownUserAgent: Bool) -> [ProxyApprovalHeader] {
+    static func maskSafeHeaders(for request: ProxyApprovalRequest, knownUserAgents: [String]) -> [ProxyApprovalHeader] {
         request.headers.filter { 
             let name = $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if name == "user-agent" {
-                return !isKnownUserAgent
+                return !knownUserAgents.contains($0.value)
             }
             
             return !isSafe($0, in: request)
         }
     }
 
-    static func getUserAgent(for request: ProxyApprovalRequest) -> String {
-        request.headers.first { header in
-            header.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "user-agent"
-        }?.value.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    static func getUserAgents(for request: ProxyApprovalRequest) -> [String] {
+        request.headers.filter {
+            $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "user-agent"
+        }.map { $0.value }
     }
 
     static func isSafe(_ header: ProxyApprovalHeader, in request: ProxyApprovalRequest) -> Bool {

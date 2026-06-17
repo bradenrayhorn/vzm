@@ -1,6 +1,6 @@
 import Foundation
 
-final class ApprovalService {
+actor ApprovalService {
     static let shared: ApprovalService = {
         do {
             return try ApprovalService()
@@ -27,12 +27,12 @@ final class ApprovalService {
     func askForApproval(request: ProxyApprovalRequest) async -> Bool {
         var request = request
         let knownDomain = !request.domain.isEmpty && recognizedElementStore.contains(request.domain, type: .domain)
-        let userAgent = ApprovalHeaderMasker.getUserAgent(for: request)
-        let isKnownUserAgent = !userAgent.isEmpty && recognizedElementStore.contains(userAgent, type: .userAgent)
-        
+        let userAgents = ApprovalHeaderMasker.getUserAgents(for: request)
+        let knownUserAgents = userAgents.filter { recognizedElementStore.contains($0, type: .userAgent) }
+
         var warnings: [String] = []
 
-        if let bodyWarning = request.body?.warning {
+        if let bodyWarning = request.body?.warning, !bodyWarning.isEmpty {
             warnings.append(bodyWarning)
         }
 
@@ -45,7 +45,7 @@ final class ApprovalService {
             return true
         }
 
-        request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, isKnownUserAgent: isKnownUserAgent)
+        request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: knownUserAgents)
 
         var selectedEngine: (any ApprovalEngine)?
         for engine in engines {
@@ -71,15 +71,17 @@ final class ApprovalService {
         )
         let isApproved = approved == .approveEngine || approved == .approvedOnce
 
-        // permanently recognize user agent if it was approved
-        if isApproved && !isKnownUserAgent {
-            do {
-                try recognizedElementStore.insert(userAgent, type: .userAgent)
-            } catch {
-                FileHandle.standardError.write(Data("Failed to persist approved User-Agent \(userAgent): \(error)\n".utf8))
+        // permanently recognize new user agents if approved
+        if isApproved && userAgents.count > knownUserAgents.count {
+            for userAgent in Set(userAgents).subtracting(Set(knownUserAgents)) {
+                do {
+                    try recognizedElementStore.insert(userAgent, type: .userAgent)
+                } catch {
+                    FileHandle.standardError.write(Data("Failed to persist approved User-Agent \(userAgent): \(error)\n".utf8))
+                }
             }
 
-            request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, isKnownUserAgent: true)
+            request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: userAgents)
         }
 
         if approved == .approveEngine {
