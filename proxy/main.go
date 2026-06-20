@@ -149,6 +149,17 @@ type approvalResponse struct {
 	Substitutions map[string]string `json:"substitutions,omitempty"`
 }
 
+type countingWriter struct {
+	writer io.Writer
+	bytes  int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.bytes += int64(n)
+	return n, err
+}
+
 func askForApproval(request approvalRequest) approvalResponse {
 	if controlUnixPath == "" {
 		log.Printf("approval denied: no control socket configured for %s %s %s %s", request.Type, request.Method, request.Domain, request.URL)
@@ -681,8 +692,11 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 		}
 
 		stripHopByHopHeaders(resp.Header)
-		if err := resp.Write(tlsConn); err != nil {
-			log.Println("Error writing response:", err)
+		responseWriter := &countingWriter{writer: tlsConn}
+		if err := resp.Write(responseWriter); err != nil {
+			log.Printf("Error writing response for %s %s after %d bytes (content-length %d): %v", innerReq.Method, innerReq.URL.String(), responseWriter.bytes, resp.ContentLength, err)
+			resp.Body.Close()
+			break
 		}
 		resp.Body.Close()
 	}

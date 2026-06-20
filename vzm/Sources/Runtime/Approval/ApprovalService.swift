@@ -11,13 +11,21 @@ actor ApprovalService {
 
     private static let neverSeenDomainWarning = "Warning: new domain."
 
+    private static func logDecision(_ approved: Bool, request: ProxyApprovalRequest, reason: String) {
+        let decision = approved ? "approved" : "denied"
+        let timestamp = Date().ISO8601Format()
+        FileHandle.standardError.write(Data("[\(timestamp)] approval \(decision) (\(reason)): \(request.method) \(request.url)\n".utf8))
+    }
+
     private let recognizedElementStore: RecognizedElementStore
     private let engines: [any ApprovalEngine]
 
     init(
         fileManager: FileManager = .default,
         engines: [any ApprovalEngine] = [
+            ManualTemporaryApprovalEngine.shared,
             NixCacheApprovalEngine(),
+            NixGitHubApprovalEngine(),
         ]
     ) throws {
         self.recognizedElementStore = try RecognizedElementStore(fileManager: fileManager)
@@ -42,6 +50,7 @@ actor ApprovalService {
 
         // short-circuit if domain is known and it is a CONNECT
         if knownDomain && request.type == "CONNECT" {
+            Self.logDecision(true, request: request, reason: "known CONNECT domain")
             return true
         }
 
@@ -51,7 +60,7 @@ actor ApprovalService {
         for engine in engines {
             switch engine.handle(request) {
             case .approved:
-                FileHandle.standardError.write(Data("engine approved: \(request.method) \(request.url)\n".utf8))
+                Self.logDecision(true, request: request, reason: "engine \(engine.name)")
                 return true
             case .canBeEngineApproved:
                 if selectedEngine == nil {
@@ -69,6 +78,7 @@ actor ApprovalService {
                 warnings: warnings,
             )
         )
+
         let isApproved = approved == .approveEngine || approved == .approvedOnce
 
         // permanently recognize new user agents if approved
@@ -87,6 +97,8 @@ actor ApprovalService {
         if approved == .approveEngine {
             selectedEngine?.onEngineApproved(request)
         }
+
+        Self.logDecision(isApproved, request: request, reason: "user")
 
         // permanently recognize the domain if it was approved
         if isApproved && !knownDomain {

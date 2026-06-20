@@ -1,22 +1,20 @@
 import Foundation
 
-final class NixCacheApprovalEngine: BaseApprovalEngine {
-    override var name: String { "NixCache" }
+final class NixGitHubApprovalEngine: BaseApprovalEngine {
+    override var name: String { "NixGitHub" }
 
     private var approvedHeaders: [ProxyApprovalHeader]?
 
     private static let urlRegexes: [NSRegularExpression] = [
-        try! NSRegularExpression(pattern: #"^channels\.nixos\.org/flake-registry\.json$"#),
-        try! NSRegularExpression(pattern: #"^cache\.nixos\.org/nix-cache-info$"#),
-        try! NSRegularExpression(pattern: #"^cache\.nixos\.org/([0-9abcdfghijklmnpqrsvwxyz]{32})\.narinfo$"#),
-        try! NSRegularExpression(pattern: #"^cache\.nixos\.org/nar/([0-9abcdfghijklmnpqrsvwxyz]{52})\.nar\.(xz|zst)$"#),
+        try! NSRegularExpression(pattern: #"^github\.com/[A-Za-z0-9-]{1,40}/[A-Za-z0-9-]{1,40}/archive/[0-9a-f]{40}\.tar\.gz$"#),
+        try! NSRegularExpression(pattern: #"^codeload\.github\.com/[A-Za-z0-9-]{1,40}/[A-Za-z0-9-]{1,40}/tar\.gz/[0-9a-f]{40}$"#),
     ]
 
     init() {
         super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 5 * 60),
+            TimeWindowApprovalGate.new(durationSeconds: 2 * 60),
             IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
-            MaxRequestsApprovalGate.new(maxRequests: 1024),
+            MaxRequestsApprovalGate.new(maxRequests: 256),
         ])
     }
 

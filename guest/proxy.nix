@@ -5,14 +5,30 @@ let
   proxyEnv = {
     HTTPS_PROXY = proxyURL;
     https_proxy = proxyURL;
+    HTTP_PROXY = proxyURL;
+    http_proxy = proxyURL;
     SSL_CERT_FILE = lib.mkForce caBundle;
     NIX_SSL_CERT_FILE = lib.mkForce caBundle;
     CURL_CA_BUNDLE = lib.mkForce caBundle;
+    GIT_SSL_CAINFO = lib.mkForce caBundle;
     REQUESTS_CA_BUNDLE = lib.mkForce caBundle;
   };
 in
 {
   environment.variables = proxyEnv;
+  nix.settings.extra-sandbox-paths = [
+    caBundle
+    "/run/vzm/mitm-ca.crt.pem"
+  ];
+
+  # nixos-rebuild fetches flake inputs in the sudo/root client process before
+  # nix-daemon builds anything. Preserve the proxy variables through sudo so
+  # `sudo nixos-rebuild switch --flake ...` works without manually prefixing
+  # the command with `sudo env ...`.
+  security.sudo.extraConfig = ''
+    Defaults env_keep += "HTTP_PROXY http_proxy HTTPS_PROXY https_proxy"
+    Defaults env_keep += "SSL_CERT_FILE NIX_SSL_CERT_FILE CURL_CA_BUNDLE GIT_SSL_CAINFO REQUESTS_CA_BUNDLE"
+  '';
 
   systemd.services.vzm-mitm-ca = {
     description = "Fetch VZM MITM proxy CA";

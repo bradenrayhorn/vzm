@@ -30,6 +30,8 @@ struct VZMMenuBarApp: App {
             VStack {
                 Text("VM Running...")
                 Divider()
+                ApprovalModeMenuView()
+                Divider()
                 PortExposureMenuView(coordinator: portExposureCoordinator)
             }
             .padding(.vertical, 4)
@@ -107,6 +109,17 @@ enum ApprovalCoordinatorResult {
     case approvedOnce
     case approveEngine
     case denied
+}
+
+struct ApprovalModeMenuView: View {
+    var body: some View {
+        Section("Approvals") {
+            Button("Approve everything for 5 min") {
+                ManualTemporaryApprovalEngine.shared.activateForFiveMinutes()
+            }
+        }
+        .frame(minWidth: 280, alignment: .leading)
+    }
 }
 
 @Observable
