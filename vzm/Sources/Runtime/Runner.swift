@@ -12,12 +12,44 @@ struct VMResources {
     let memorySizeBytes: UInt64
 }
 
+enum VMRootScratchDisk {
+    static let blockDeviceIdentifier = "vzm-root"
+    static let imageFileName = "root.raw"
+    static let sizeBytes: UInt64 = 64 * 1024 * 1024 * 1024
+}
+
+struct TemporaryDiskImage {
+    let directoryURL: URL
+    let imageURL: URL
+
+    static func create(prefix: String, imageFileName: String, sizeBytes: UInt64, fileManager: FileManager = .default) throws -> TemporaryDiskImage {
+        let directoryURL = fileManager.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+            .standardizedFileURL
+        let imageURL = directoryURL.appendingPathComponent(imageFileName)
+
+        do {
+            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            try SparseDiskImage.create(at: imageURL, sizeBytes: sizeBytes, fileManager: fileManager)
+            return TemporaryDiskImage(directoryURL: directoryURL, imageURL: imageURL)
+        } catch {
+            try? fileManager.removeItem(at: directoryURL)
+            throw error
+        }
+    }
+
+    func remove(fileManager: FileManager = .default) {
+        try? fileManager.removeItem(at: directoryURL)
+    }
+}
+
 @MainActor
 class Runner {
 
     let vmBundle: StoredVM
     let rootBundle: RootBundle
     let diskBundles: [DiskBundle]
+    let rootScratchDisk: TemporaryDiskImage
     let vmLease: FileLockLease
     let diskLease: FileLockLease
     let machine: VZVirtualMachine
@@ -37,14 +69,38 @@ class Runner {
         self.diskBundles = try vmBundle.manifest.disks.map { try diskStore.loadDisk(named: $0.name) }
         self.diskLease = try diskStore.acquireLease(for: diskBundles)
 
-        let configuration = try VZConfiguration().build(vmBundle: vmBundle, rootBundle: rootBundle, diskBundles: diskBundles, resources: resources)
-        machine = VZVirtualMachine(configuration: configuration)
+        let createdRootScratchDisk = try TemporaryDiskImage.create(
+            prefix: "vzm-root-\(vmBundle.manifest.name)",
+            imageFileName: VMRootScratchDisk.imageFileName,
+            sizeBytes: VMRootScratchDisk.sizeBytes
+        )
+
+        do {
+            let configuration = try VZConfiguration().build(
+                vmBundle: vmBundle,
+                rootBundle: rootBundle,
+                rootScratchDiskURL: createdRootScratchDisk.imageURL,
+                diskBundles: diskBundles,
+                resources: resources
+            )
+            self.rootScratchDisk = createdRootScratchDisk
+            machine = VZVirtualMachine(configuration: configuration)
+        } catch {
+            createdRootScratchDisk.remove()
+            throw error
+        }
 
         stopDelegate = VMStopDelegate()
         machine.delegate = stopDelegate
     }
 
+    deinit {
+        rootScratchDisk.remove()
+    }
+
     func run() async throws {
+        defer { rootScratchDisk.remove() }
+
         let proxyService = try ProxyService(vmName: vmBundle.manifest.name)
         var portExposureService: PortExposureService?
 
@@ -105,6 +161,10 @@ class Runner {
             }
         } catch {
             await stopRuntimeServices(portExposureService: portExposureService, proxyService: proxyService)
+            if machine.canStop {
+                try? await stopImmediately()
+                stopDelegate.hostDidStop()
+            }
             throw error
         }
 
@@ -177,7 +237,7 @@ struct VZConfiguration {
     static let defaultCPUCount = 4
     static let defaultMemorySizeBytes: UInt64 = 2 * VMResources.gibibyte
 
-    func build(vmBundle: StoredVM, rootBundle: RootBundle, diskBundles: [DiskBundle], resources: VMResources) throws -> VZVirtualMachineConfiguration {
+    func build(vmBundle: StoredVM, rootBundle: RootBundle, rootScratchDiskURL: URL, diskBundles: [DiskBundle], resources: VMResources) throws -> VZVirtualMachineConfiguration {
         let configuration = VZVirtualMachineConfiguration()
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
@@ -197,6 +257,7 @@ struct VZConfiguration {
         configuration.serialPorts = [console]
         var storageDevices = [VZStorageDeviceConfiguration]()
         storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: rootFs))
+        storageDevices.append(try writableBlockDevice(url: rootScratchDiskURL, identifier: VMRootScratchDisk.blockDeviceIdentifier))
         storageDevices.append(try writableBlockDevice(url: vmBundle.stateImageURL, identifier: VMStateDisk.blockDeviceIdentifier))
 
         for diskBundle in diskBundles {

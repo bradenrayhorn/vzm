@@ -1,11 +1,37 @@
 { pkgs, lib, config, ... }:
 {
-  # Ephemeral root: stage 1 mounts this tmpfs at /mnt-root, then mounts the
+  # Ephemeral root: vzm attaches a fresh sparse host-backed disk for each run.
+  # Stage 1 formats it if needed, mounts it at /mnt-root, then mounts the
   # immutable squashfs Nix store below before switching to stage 2.
+  boot.initrd.extraUtilsCommands = ''
+    copy_bin_and_libs ${pkgs.e2fsprogs}/bin/mke2fs
+    copy_bin_and_libs ${pkgs.e2fsprogs}/bin/mkfs.ext4
+    copy_bin_and_libs ${pkgs.util-linux}/bin/blkid
+  '';
+
+  boot.initrd.postDeviceCommands = lib.mkBefore ''
+    root_device=/dev/disk/by-id/virtio-vzm-root
+
+    if [ ! -b "$root_device" ]; then
+      echo "vzm: missing ephemeral root disk at $root_device" >&2
+      exit 1
+    fi
+
+    if ! blkid "$root_device" >/dev/null 2>&1; then
+      echo "vzm: formatting ephemeral root disk"
+      mkfs.ext4 -F -L vzm-root "$root_device"
+    fi
+  '';
+
+  boot.initrd.postMountCommands = lib.mkBefore ''
+    mkdir -p /mnt-root/nix/.rw-store/store /mnt-root/nix/.rw-store/work
+  '';
+
   fileSystems."/" = {
-    device = "none";
-    fsType = "tmpfs";
-    options = [ "mode=0755" ];
+    device = "/dev/disk/by-id/virtio-vzm-root";
+    fsType = "ext4";
+    options = [ "rw" "noatime" ];
+    neededForBoot = true;
   };
 
   # The per-VM state disk is attached by vzm as virtio-vzm-state. It is not
@@ -27,16 +53,10 @@
     neededForBoot = true;
   };
 
-  # Ephemeral writable layer for the Nix store and /nix/var. Anything built or
-  # registered at runtime disappears on reboot; the squashfs lowerdir remains
-  # immutable.
-  fileSystems."/nix/.rw-store" = {
-    device = "none";
-    fsType = "tmpfs";
-    options = [ "mode=0755" ];
-    neededForBoot = true;
-  };
-
+  # Ephemeral writable layer for the Nix store and /nix/var. This lives on the
+  # host-backed ephemeral root disk, so builds do not consume VM RAM. Anything
+  # built or registered at runtime disappears on reboot; the squashfs lowerdir
+  # remains immutable.
   fileSystems."/nix/store" = {
     overlay = {
       lowerdir = [ "/nix/.ro-store" ];
