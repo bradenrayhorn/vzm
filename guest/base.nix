@@ -91,11 +91,11 @@
 
   time.timeZone = "America/Chicago";
 
-  nix.gc = {
-    automatic = true;
-    dates = "weekly";
-    options = "--delete-older-than 7d";
-  };
+  # pin nixpkgs registry to same instance used to build guest
+  nix.registry.nixpkgs.flake = nixpkgs;
+  nix.nixPath = [ "nixpkgs=${nixpkgs}" ];
+
+  nix.gc.automatic = false;
 
   system.stateVersion = "25.11";
 }
