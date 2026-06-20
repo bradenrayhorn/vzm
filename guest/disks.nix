@@ -1,34 +1,52 @@
-{ pkgs, lib, config, ... }:
+{ pkgs, lib, config, utils, ... }:
+let
+  rootDevice = "/dev/disk/by-id/virtio-vzm-root";
+  rootDeviceUnit = "${utils.escapeSystemdPath rootDevice}.device";
+  rootFsckUnit = "systemd-fsck-root.service";
+in
 {
   # Ephemeral root: vzm attaches a fresh sparse host-backed disk for each run.
-  # Stage 1 formats it if needed, mounts it at /mnt-root, then mounts the
+  # Systemd stage 1 formats it if needed, mounts it at /sysroot, then mounts the
   # immutable squashfs Nix store below before switching to stage 2.
-  boot.initrd.extraUtilsCommands = ''
-    copy_bin_and_libs ${pkgs.e2fsprogs}/bin/mke2fs
-    copy_bin_and_libs ${pkgs.e2fsprogs}/bin/mkfs.ext4
-    copy_bin_and_libs ${pkgs.util-linux}/bin/blkid
-  '';
+  boot.initrd.systemd.extraBin = {
+    blkid = "${pkgs.util-linux}/bin/blkid";
+    mke2fs = "${pkgs.e2fsprogs}/bin/mke2fs";
+    "mkfs.ext4" = "${pkgs.e2fsprogs}/bin/mkfs.ext4";
+  };
 
-  boot.initrd.postDeviceCommands = lib.mkBefore ''
-    root_device=/dev/disk/by-id/virtio-vzm-root
+  boot.initrd.systemd.services.vzm-format-root = {
+    description = "Format vzm ephemeral root disk";
+    requiredBy = [ "sysroot.mount" ];
+    requires = [ rootDeviceUnit ];
+    after = [ rootDeviceUnit ];
+    before = [
+      rootFsckUnit
+      "sysroot.mount"
+      "shutdown.target"
+    ];
+    conflicts = [ "shutdown.target" ];
+    unitConfig.DefaultDependencies = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      root_device=${lib.escapeShellArg rootDevice}
 
-    if [ ! -b "$root_device" ]; then
-      echo "vzm: missing ephemeral root disk at $root_device" >&2
-      exit 1
-    fi
+      if [ ! -b "$root_device" ]; then
+        echo "vzm: missing ephemeral root disk at $root_device" >&2
+        exit 1
+      fi
 
-    if ! blkid "$root_device" >/dev/null 2>&1; then
-      echo "vzm: formatting ephemeral root disk"
-      mkfs.ext4 -F -L vzm-root "$root_device"
-    fi
-  '';
-
-  boot.initrd.postMountCommands = lib.mkBefore ''
-    mkdir -p /mnt-root/nix/.rw-store/store /mnt-root/nix/.rw-store/work
-  '';
+      if ! blkid "$root_device" >/dev/null 2>&1; then
+        echo "vzm: formatting ephemeral root disk"
+        mkfs.ext4 -F -L vzm-root "$root_device"
+      fi
+    '';
+  };
 
   fileSystems."/" = {
-    device = "/dev/disk/by-id/virtio-vzm-root";
+    device = rootDevice;
     fsType = "ext4";
     options = [ "rw" "noatime" ];
     neededForBoot = true;

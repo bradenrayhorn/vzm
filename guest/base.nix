@@ -1,4 +1,4 @@
-{ modulesPath, pkgs, lib, ... }:
+{ modulesPath, pkgs, lib, nixpkgs, ... }:
 {
   imports = [
     (modulesPath + "/profiles/qemu-guest.nix")
@@ -97,5 +97,5 @@
 
   nix.gc.automatic = false;
 
-  system.stateVersion = "25.11";
+  system.stateVersion = "26.05";
 }

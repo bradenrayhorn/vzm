@@ -2,7 +2,7 @@
   description = "Direct-boot NixOS guest bundle for vzm";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   };
 
   outputs =
@@ -19,7 +19,8 @@
           specialArgs ? { }
         }:
         nixpkgs.lib.nixosSystem {
-          inherit system modules specialArgs;
+          inherit system modules;
+          specialArgs = { inherit nixpkgs; } // specialArgs;
         };
 
       mkGuestBundle =
