@@ -77,6 +77,7 @@
   environment.systemPackages = with pkgs; [
     vim
     git
+    ghostty.terminfo
   ];
 
   nixpkgs.config.allowUnfree = true;
