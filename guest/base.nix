@@ -59,7 +59,7 @@
     "vmw_vsock_virtio_transport"
     "overlay"
   ];
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  boot.kernelPackages = pkgs.linuxPackages;
   boot.supportedFilesystems.zfs = lib.mkForce false;
   boot.loader.grub.enable = false;
   boot.loader.systemd-boot.enable = false;
