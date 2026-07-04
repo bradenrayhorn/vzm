@@ -235,7 +235,7 @@ extension VMResources {
 
 struct VZConfiguration {
     static let defaultCPUCount = 4
-    static let defaultMemorySizeBytes: UInt64 = 2 * VMResources.gibibyte
+    static let defaultMemorySizeBytes: UInt64 = 8 * VMResources.gibibyte
 
     func build(vmBundle: StoredVM, rootBundle: RootBundle, rootScratchDiskURL: URL, diskBundles: [DiskBundle], resources: VMResources) throws -> VZVirtualMachineConfiguration {
         let configuration = VZVirtualMachineConfiguration()

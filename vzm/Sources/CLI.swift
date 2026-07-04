@@ -89,9 +89,9 @@ struct CreateDisk: ParsableCommand {
 
 struct Run: AsyncParsableCommand {
     @Argument var name: String
-    @Option(name: .long, help: "Number of virtual CPUs. Defaults to the current value (\(VZConfiguration.defaultCPUCount)).")
+    @Option(name: .long, help: "Number of virtual CPUs. Defaults to (\(VZConfiguration.defaultCPUCount)).")
     var cpuCount: Int = VZConfiguration.defaultCPUCount
-    @Option(name: .long, help: "Memory size in GiB. Defaults to the current value (\(VZConfiguration.defaultMemorySizeBytes / VMResources.gibibyte)).")
+    @Option(name: .long, help: "Memory size in GiB. Defaults to (\(VZConfiguration.defaultMemorySizeBytes / VMResources.gibibyte)).")
     var memoryGB: UInt64 = VZConfiguration.defaultMemorySizeBytes / VMResources.gibibyte
 
     mutating func run() async throws {
