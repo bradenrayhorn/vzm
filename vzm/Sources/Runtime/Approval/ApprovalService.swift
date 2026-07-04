@@ -9,9 +9,14 @@ actor ApprovalService {
         }
     }()
 
+    private struct SelectedEngine {
+        let engine: any ApprovalEngine
+        let prompt: EnginePrompt
+    }
+
     private struct PendingApproval {
         let request: ProxyApprovalRequest
-        let selectedEngine: (any ApprovalEngine)?
+        let selectedEngine: SelectedEngine?
         let warnings: [String]
         let knownDomain: Bool
         let userAgents: [String]
@@ -40,6 +45,7 @@ actor ApprovalService {
         fileManager: FileManager = .default,
         engines: [any ApprovalEngine] = [
             ManualTemporaryApprovalEngine.shared,
+            ChatGPTApprovalEngine(),
             GradleDistributionApprovalEngine(),
             MavenRepositoryApprovalEngine(),
             NixCacheApprovalEngine(),
@@ -95,14 +101,15 @@ actor ApprovalService {
 
         request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: knownUserAgents)
 
-        var selectedEngine: (any ApprovalEngine)?
+        var selectedEngine: SelectedEngine?
         for engine in engines {
             switch engine.handle(request) {
             case .approved:
                 return .approved(request: request, reason: "engine \(engine.name)")
-            case .canBeEngineApproved:
+            case let .userApprovalRequired(prompt):
                 if selectedEngine == nil {
-                    selectedEngine = engine
+                    selectedEngine = SelectedEngine(engine: engine, prompt: prompt)
+                    break
                 }
             case .unknown:
                 break
@@ -123,17 +130,13 @@ actor ApprovalService {
 
     private func askUserForApproval(_ pendingApproval: PendingApproval) async -> Bool {
         var request = pendingApproval.request
-        let approved = await ApprovalCoordinator.shared.askForApproval(
+        let action = await ApprovalCoordinator.shared.askForApproval(
             request: ApprovalCoordinatorRequest(
-                proxy: request,
-                engineRequest: pendingApproval.selectedEngine.map { ApprovalEngineRequest(name: $0.name) },
-                warnings: pendingApproval.warnings,
+                presentation: buildPromptPresentation(for: pendingApproval)
             )
         )
 
-        let isApproved = approved == .approveEngine || approved == .approvedOnce
-
-        if isApproved && pendingApproval.userAgents.count > pendingApproval.knownUserAgents.count {
+        if action.isApproved && pendingApproval.userAgents.count > pendingApproval.knownUserAgents.count {
             for userAgent in Set(pendingApproval.userAgents).subtracting(Set(pendingApproval.knownUserAgents)) {
                 do {
                     try recognizedElementStore.insert(userAgent, type: .userAgent)
@@ -145,11 +148,11 @@ actor ApprovalService {
             request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: pendingApproval.userAgents)
         }
 
-        if approved == .approveEngine {
-            pendingApproval.selectedEngine?.onEngineApproved(request)
+        if action == .approveEngine {
+            pendingApproval.selectedEngine?.engine.onEngineApproved(request)
         }
 
-        if isApproved && !pendingApproval.knownDomain {
+        if action.isApproved && !pendingApproval.knownDomain {
             do {
                 try recognizedElementStore.insert(request.domain, type: .domain)
             } catch {
@@ -157,7 +160,78 @@ actor ApprovalService {
             }
         }
 
-        return isApproved
+        return action.isApproved
+    }
+
+    private func buildPromptPresentation(for pendingApproval: PendingApproval) -> ApprovalPromptPresentation {
+        if let selectedEngine = pendingApproval.selectedEngine,
+           case let .presentation(presentation) = selectedEngine.prompt {
+            return ApprovalPromptPresentation(
+                title: presentation.title,
+                subtitle: presentation.subtitle,
+                warnings: pendingApproval.warnings + presentation.warnings,
+                sections: presentation.sections,
+                actions: presentation.actions
+            )
+        }
+
+        let request = pendingApproval.request
+
+        return ApprovalPromptPresentation(
+            title: "Outbound",
+            subtitle: pendingApproval.selectedEngine.map { "🚂 available: \($0.engine.name)" },
+            warnings: pendingApproval.warnings,
+            sections: buildDefaultSections(for: request),
+            actions: buildDefaultActions(hasEngine: pendingApproval.selectedEngine != nil)
+        )
+    }
+
+    private func buildDefaultSections(for request: ProxyApprovalRequest) -> [ApprovalPromptSection] {
+        var sections: [ApprovalPromptSection] = [
+            ApprovalPromptSection(title: "Type", text: request.type),
+            ApprovalPromptSection(title: "URL", text: "\(request.method) \(request.url)"),
+        ]
+
+        if !request.domain.isEmpty {
+            sections.append(ApprovalPromptSection(title: "Domain", text: request.domain))
+        }
+
+        if !request.headers.isEmpty {
+            sections.append(
+                ApprovalPromptSection(
+                    title: "Headers",
+                    text: request.headers.map { "\($0.name): \($0.value)" }.joined(separator: "\n")
+                )
+            )
+        }
+
+        if let body = request.body {
+            sections.append(ApprovalPromptSection(title: "Body", text: body.text))
+        }
+
+        if !request.secrets.isEmpty {
+            sections.append(ApprovalPromptSection(title: "Secrets", text: request.secrets.joined(separator: ", ")))
+        }
+
+        return sections
+    }
+
+    private func buildDefaultActions(hasEngine: Bool) -> [ApprovalPromptAction] {
+        var actions: [ApprovalPromptAction] = [
+            ApprovalPromptAction(id: .deny, label: "❌ Deny", keyboardShortcut: .cancelAction)
+        ]
+
+        if hasEngine {
+            actions.append(
+                ApprovalPromptAction(id: .approveEngine, label: "🚂 Approve engine", keyboardShortcut: .optionReturn)
+            )
+        }
+
+        actions.append(
+            ApprovalPromptAction(id: .approveOnce, label: "✅ Approve", keyboardShortcut: .defaultAction)
+        )
+
+        return actions
     }
 
     private func waitForApprovalTurn() async {

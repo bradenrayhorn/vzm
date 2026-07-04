@@ -33,7 +33,7 @@ final class NixCacheApprovalEngine: BaseApprovalEngine {
         guard request.method == "GET" else {
             return .unknown
         }
-        guard urlMatches(request.url) else {
+        guard urlMatches(regexes: Self.urlRegexes, request.url) else {
             return .unknown
         }
 
@@ -41,20 +41,11 @@ final class NixCacheApprovalEngine: BaseApprovalEngine {
             return .approved
         }
 
-        return .canBeEngineApproved
+        return .userApprovalRequired(.default)
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
         approvedHeaders = request.headers
         super.onEngineApproved(request)
-    }
-
-    private func urlMatches(_ url: String) -> Bool {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
-        return Self.urlRegexes.contains { regex in
-            regex.firstMatch(in: trimmed, range: range) != nil
-        }
     }
 }

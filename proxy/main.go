@@ -651,9 +651,14 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 			break
 		}
 
+		approvalType := "REQUEST"
+		if isWebSocketUpgradeRequest(innerReq) {
+			approvalType = "WEBSOCKET"
+		}
+
 		reqURL, _ := approvalDisplayBytes([]byte(targetHost + innerReq.RequestURI))
 		approval := askForApproval(approvalRequest{
-			Type:    "REQUEST",
+			Type:    approvalType,
 			Domain:  targetHost,
 			Method:  innerReq.Method,
 			URL:     reqURL,
@@ -668,6 +673,13 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 		if err := applySecretSubstitutions(innerReq, approval.Substitutions); err != nil {
 			log.Println("Error substituting request secrets:", err)
 			tlsConn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			break
+		}
+
+		if approvalType == "WEBSOCKET" {
+			if err := proxyWebSocketConnection(tlsConn, bufReader, innerReq, targetHost, targetPort); err != nil {
+				log.Println("Error proxying websocket connection:", err)
+			}
 			break
 		}
 
@@ -700,6 +712,106 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 		}
 		resp.Body.Close()
 	}
+}
+
+func isWebSocketUpgradeRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodGet {
+		return false
+	}
+	if !headerHasToken(r.Header, "Connection", "upgrade") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
+}
+
+func proxyWebSocketConnection(clientConn net.Conn, clientReader *bufio.Reader, innerReq *http.Request, targetHost, targetPort string) error {
+	upstreamConn, err := dialPublicTCPContext(shutdownCtx, "tcp", net.JoinHostPort(targetHost, targetPort))
+	if err != nil {
+		return err
+	}
+	defer upstreamConn.Close()
+
+	upstreamTLSConn := tls.Client(upstreamConn, &tls.Config{
+		ServerName: targetHost,
+		NextProtos: []string{"http/1.1"},
+	})
+	defer upstreamTLSConn.Close()
+
+	if err := upstreamTLSConn.Handshake(); err != nil {
+		return err
+	}
+
+	innerReq.URL.Scheme = "https"
+	innerReq.URL.Host = innerReq.Host
+	innerReq.RequestURI = ""
+	innerReq.Close = false
+	innerReq.Header.Del("Proxy-Connection")
+	innerReq.Header.Del("Proxy-Authorization")
+
+	if err := innerReq.Write(upstreamTLSConn); err != nil {
+		return err
+	}
+
+	upstreamReader := bufio.NewReader(upstreamTLSConn)
+	resp, err := http.ReadResponse(upstreamReader, innerReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if err := resp.Write(clientConn); err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return nil
+	}
+
+	return tunnelConnections(clientConn, clientReader, upstreamTLSConn, upstreamReader)
+}
+
+func tunnelConnections(clientConn net.Conn, clientReader *bufio.Reader, upstreamConn net.Conn, upstreamReader *bufio.Reader) error {
+	errCh := make(chan error, 2)
+
+	go func() {
+		_, err := io.Copy(upstreamConn, clientReader)
+		closeWrite(upstreamConn)
+		errCh <- err
+	}()
+
+	go func() {
+		_, err := io.Copy(clientConn, upstreamReader)
+		closeWrite(clientConn)
+		errCh <- err
+	}()
+
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func closeWrite(conn net.Conn) {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+
+	if conn, ok := conn.(closeWriter); ok {
+		_ = conn.CloseWrite()
+	}
+}
+
+func headerHasToken(header http.Header, key, token string) bool {
+	for _, value := range header.Values(key) {
+		for _, part := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hostHeaderMatches(header, targetHost, targetPort string) bool {

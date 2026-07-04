@@ -44,7 +44,7 @@ final class MavenRepositoryApprovalEngine: BaseApprovalEngine {
             return .approved
         }
 
-        return .canBeEngineApproved
+        return .userApprovalRequired(.default)
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {

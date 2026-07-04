@@ -28,6 +28,10 @@ final class ManualTemporaryApprovalEngine: ApprovalEngine {
             return .unknown
         }
 
+        guard request.type != "WEBSOCKET" else {
+            return .unknown
+        }
+
         if Date() <= deadline {
             return .approved
         }

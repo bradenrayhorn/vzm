@@ -95,21 +95,11 @@ struct PortExposureControls: View {
     }
 }
 
-struct ApprovalEngineRequest: Codable, Sendable {
-    let name: String
-}
-
 struct ApprovalCoordinatorRequest: Codable, Sendable {
-    let proxy: ProxyApprovalRequest
-    let engineRequest: ApprovalEngineRequest?
-    var warnings: [String]
+    let presentation: ApprovalPromptPresentation
 }
 
-enum ApprovalCoordinatorResult {
-    case approvedOnce
-    case approveEngine
-    case denied
-}
+typealias ApprovalCoordinatorResult = ApprovalPromptActionType
 
 struct ApprovalModeMenuView: View {
     var body: some View {
@@ -141,7 +131,7 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
         await withCheckedContinuation { continuation in
             let pendingCount = queuedApprovals.count + (activeApproval == nil ? 0 : 1)
             guard pendingCount < maxPendingApprovals else {
-                continuation.resume(returning: .denied)
+                continuation.resume(returning: .deny)
                 return
             }
 
@@ -152,7 +142,7 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === popupWindow, activeApproval != nil {
-            finishActiveApproval(result: .denied, closeWindow: false)
+            finishActiveApproval(result: .deny, closeWindow: false)
         }
         return true
     }
@@ -221,27 +211,39 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func applyApprovalShortcut(_ shortcut: ApprovalPromptKeyboardShortcut?) -> some View {
+        switch shortcut {
+        case .cancelAction:
+            self.keyboardShortcut(.cancelAction)
+        case .defaultAction:
+            self.keyboardShortcut(.defaultAction)
+        case .optionReturn:
+            self.keyboardShortcut(.return, modifiers: [.option])
+        case nil:
+            self
+        }
+    }
+}
+
 struct ApprovalPromptView: View {
     let request: ApprovalCoordinatorRequest
     let onResolve: (ApprovalCoordinatorResult) -> Void
 
-    private var headerText: String {
-        request.proxy.headers.map { "\($0.name): \($0.value)" }.joined(separator: "\n")
-    }
-    
     var body: some View {
         VStack(spacing: 16) {
-            Text("Outbound")
+            Text(request.presentation.title)
                 .font(.headline)
-            
-            VStack(spacing: 8) {
-                Text(request.proxy.type)
-                Text(request.proxy.domain)
-                    .font(.body.bold())
 
-                if !request.warnings.isEmpty {
+            VStack(spacing: 8) {
+                if let subtitle = request.presentation.subtitle {
+                    Text(subtitle)
+                }
+
+                if !request.presentation.warnings.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(request.warnings, id: \.self) { warning in
+                        ForEach(request.presentation.warnings, id: \.self) { warning in
                             Text("⚠️ \(warning)")
                                 .foregroundStyle(.orange)
                                 .textSelection(.enabled)
@@ -249,80 +251,29 @@ struct ApprovalPromptView: View {
                     }
                 }
 
-                if let engine = request.engineRequest {
-                    Text("🚂 available engine: \(engine.name)")
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(request.proxy.method)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(request.proxy.url)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                if !request.proxy.headers.isEmpty {
+                ForEach(Array(request.presentation.sections.enumerated()), id: \.offset) { _, section in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Headers")
+                        Text(section.title)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         ScrollView {
-                            Text(headerText)
+                            Text(section.text)
                                 .font(.system(.caption, design: .monospaced))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(maxHeight: 140)
+                        .frame(maxHeight: 240)
                     }
-                }
-
-                if let body = request.proxy.body {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Body")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ScrollView {
-                            Text(body.text)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxHeight: 180)
-                    }
-                }
-
-                if !request.proxy.secrets.isEmpty {
-                    VStack(spacing: 4) {
-                        Text("Secrets")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(request.proxy.secrets.joined(separator: ", "))
-                            .font(.body)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(.top, 8)
                 }
             }
-            
-            HStack(spacing: 20) {
-                Button("❌ Deny") {
-                    onResolve(.denied)
-                }
-                .keyboardShortcut(.cancelAction)
 
-                if request.engineRequest != nil {
-                    Button("🚂 Approve engine") {
-                        onResolve(.approveEngine)
+            HStack(spacing: 20) {
+                ForEach(Array(request.presentation.actions.enumerated()), id: \.offset) { _, action in
+                    Button(action.label) {
+                        onResolve(action.id)
                     }
-                    .keyboardShortcut(.return, modifiers: [.option])
+                    .applyApprovalShortcut(action.keyboardShortcut)
                 }
-                
-                Button("✅ Approve") {
-                    onResolve(.approvedOnce)
-                }
-                .keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
