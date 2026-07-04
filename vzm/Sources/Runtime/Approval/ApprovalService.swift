@@ -43,17 +43,19 @@ actor ApprovalService {
 
     init(
         fileManager: FileManager = .default,
-        engines: [any ApprovalEngine] = [
+        engines: [any ApprovalEngine]? = nil
+    ) throws {
+        let recognizedElementStore = try RecognizedElementStore(fileManager: fileManager)
+        self.recognizedElementStore = recognizedElementStore
+        self.engines = engines ?? [
             ManualTemporaryApprovalEngine.shared,
             ChatGPTApprovalEngine(),
             GradleDistributionApprovalEngine(),
             MavenRepositoryApprovalEngine(),
             NixCacheApprovalEngine(),
             NixGitHubApprovalEngine(),
+            ApproveForeverApprovalEngine(recognizedElementStore: recognizedElementStore),
         ]
-    ) throws {
-        self.recognizedElementStore = try RecognizedElementStore(fileManager: fileManager)
-        self.engines = engines
     }
 
     func askForApproval(request: ProxyApprovalRequest) async -> Bool {
@@ -109,7 +111,6 @@ actor ApprovalService {
             case let .userApprovalRequired(prompt):
                 if selectedEngine == nil {
                     selectedEngine = SelectedEngine(engine: engine, prompt: prompt)
-                    break
                 }
             case .unknown:
                 break

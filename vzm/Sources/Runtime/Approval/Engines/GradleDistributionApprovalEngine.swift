@@ -16,9 +16,9 @@ final class GradleDistributionApprovalEngine: BaseApprovalEngine {
 
     init() {
         super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 5 * 60),
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
-            MaxRequestsApprovalGate.new(maxRequests: 32),
+            TimeWindowApprovalGate.new(durationSeconds: 8 * 60),
+            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 60),
+            RateLimitApprovalGate.new(windowSeconds: 60, maxRequests: 30),
         ])
     }
 

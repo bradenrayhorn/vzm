@@ -14,7 +14,7 @@ final class NixGitHubApprovalEngine: BaseApprovalEngine {
         super.init(gateBuilders: [
             TimeWindowApprovalGate.new(durationSeconds: 2 * 60),
             IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
-            MaxRequestsApprovalGate.new(maxRequests: 256),
+            RateLimitApprovalGate.new(windowSeconds: 60, maxRequests: 60),
         ])
     }
 

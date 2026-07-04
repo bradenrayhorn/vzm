@@ -16,7 +16,6 @@ enum ApprovalPromptActionType: String, Codable, Sendable {
     case deny
     case approveOnce
     case approveEngine
-    case alwaysApprove
 }
 
 extension ApprovalPromptActionType {
@@ -24,7 +23,7 @@ extension ApprovalPromptActionType {
         switch self {
         case .deny:
             return false
-        case .approveOnce, .approveEngine, .alwaysApprove:
+        case .approveOnce, .approveEngine:
             return true
         }
     }

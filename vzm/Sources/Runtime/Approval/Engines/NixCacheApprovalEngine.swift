@@ -16,7 +16,7 @@ final class NixCacheApprovalEngine: BaseApprovalEngine {
         super.init(gateBuilders: [
             TimeWindowApprovalGate.new(durationSeconds: 5 * 60),
             IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
-            MaxRequestsApprovalGate.new(maxRequests: 1024),
+            RateLimitApprovalGate.new(windowSeconds: 30, maxRequests: 60),
         ])
     }
 

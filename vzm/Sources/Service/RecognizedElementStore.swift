@@ -4,6 +4,7 @@ import Foundation
 enum RecognizedElementType: String {
     case domain
     case userAgent
+    case approvedForeverRequest
 }
 
 final class RecognizedElementStore {
@@ -80,6 +81,8 @@ final class RecognizedElementStore {
             return domain
         case .userAgent:
             return element.trimmingCharacters(in: .whitespaces)
+        case .approvedForeverRequest:
+            return element
         }
     }
 }
