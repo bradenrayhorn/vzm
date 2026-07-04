@@ -9,6 +9,20 @@ actor ApprovalService {
         }
     }()
 
+    private struct PendingApproval {
+        let request: ProxyApprovalRequest
+        let selectedEngine: (any ApprovalEngine)?
+        let warnings: [String]
+        let knownDomain: Bool
+        let userAgents: [String]
+        let knownUserAgents: [String]
+    }
+
+    private enum EvaluationResult {
+        case approved(request: ProxyApprovalRequest, reason: String)
+        case needsUserApproval(PendingApproval)
+    }
+
     private static let neverSeenDomainWarning = "Warning: new domain."
 
     private static func logDecision(_ approved: Bool, request: ProxyApprovalRequest, reason: String) {
@@ -19,6 +33,8 @@ actor ApprovalService {
 
     private let recognizedElementStore: RecognizedElementStore
     private let engines: [any ApprovalEngine]
+    private var approvalInProgress = false
+    private var approvalWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         fileManager: FileManager = .default,
@@ -33,6 +49,29 @@ actor ApprovalService {
     }
 
     func askForApproval(request: ProxyApprovalRequest) async -> Bool {
+        switch evaluate(request: request) {
+        case let .approved(request, reason):
+            Self.logDecision(true, request: request, reason: reason)
+            return true
+        case .needsUserApproval:
+            break
+        }
+
+        await waitForApprovalTurn()
+        defer { finishApprovalTurn() }
+
+        switch evaluate(request: request) {
+        case let .approved(request, reason):
+            Self.logDecision(true, request: request, reason: reason)
+            return true
+        case let .needsUserApproval(pendingApproval):
+            let isApproved = await askUserForApproval(pendingApproval)
+            Self.logDecision(isApproved, request: request, reason: "user")
+            return isApproved
+        }
+    }
+
+    private func evaluate(request: ProxyApprovalRequest) -> EvaluationResult {
         var request = request
         let knownDomain = !request.domain.isEmpty && recognizedElementStore.contains(request.domain, type: .domain)
         let userAgents = ApprovalHeaderMasker.getUserAgents(for: request)
@@ -48,10 +87,8 @@ actor ApprovalService {
             warnings.append(Self.neverSeenDomainWarning)
         }
 
-        // short-circuit if domain is known and it is a CONNECT
         if knownDomain && request.type == "CONNECT" {
-            Self.logDecision(true, request: request, reason: "known CONNECT domain")
-            return true
+            return .approved(request: request, reason: "known CONNECT domain")
         }
 
         request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: knownUserAgents)
@@ -60,8 +97,7 @@ actor ApprovalService {
         for engine in engines {
             switch engine.handle(request) {
             case .approved:
-                Self.logDecision(true, request: request, reason: "engine \(engine.name)")
-                return true
+                return .approved(request: request, reason: "engine \(engine.name)")
             case .canBeEngineApproved:
                 if selectedEngine == nil {
                     selectedEngine = engine
@@ -71,19 +107,32 @@ actor ApprovalService {
             }
         }
 
+        return .needsUserApproval(
+            PendingApproval(
+                request: request,
+                selectedEngine: selectedEngine,
+                warnings: warnings,
+                knownDomain: knownDomain,
+                userAgents: userAgents,
+                knownUserAgents: knownUserAgents
+            )
+        )
+    }
+
+    private func askUserForApproval(_ pendingApproval: PendingApproval) async -> Bool {
+        var request = pendingApproval.request
         let approved = await ApprovalCoordinator.shared.askForApproval(
             request: ApprovalCoordinatorRequest(
                 proxy: request,
-                engineRequest: selectedEngine.map { ApprovalEngineRequest(name: $0.name) },
-                warnings: warnings,
+                engineRequest: pendingApproval.selectedEngine.map { ApprovalEngineRequest(name: $0.name) },
+                warnings: pendingApproval.warnings,
             )
         )
 
         let isApproved = approved == .approveEngine || approved == .approvedOnce
 
-        // permanently recognize new user agents if approved
-        if isApproved && userAgents.count > knownUserAgents.count {
-            for userAgent in Set(userAgents).subtracting(Set(knownUserAgents)) {
+        if isApproved && pendingApproval.userAgents.count > pendingApproval.knownUserAgents.count {
+            for userAgent in Set(pendingApproval.userAgents).subtracting(Set(pendingApproval.knownUserAgents)) {
                 do {
                     try recognizedElementStore.insert(userAgent, type: .userAgent)
                 } catch {
@@ -91,17 +140,14 @@ actor ApprovalService {
                 }
             }
 
-            request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: userAgents)
+            request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: pendingApproval.userAgents)
         }
 
         if approved == .approveEngine {
-            selectedEngine?.onEngineApproved(request)
+            pendingApproval.selectedEngine?.onEngineApproved(request)
         }
 
-        Self.logDecision(isApproved, request: request, reason: "user")
-
-        // permanently recognize the domain if it was approved
-        if isApproved && !knownDomain {
+        if isApproved && !pendingApproval.knownDomain {
             do {
                 try recognizedElementStore.insert(request.domain, type: .domain)
             } catch {
@@ -110,6 +156,26 @@ actor ApprovalService {
         }
 
         return isApproved
+    }
+
+    private func waitForApprovalTurn() async {
+        if !approvalInProgress {
+            approvalInProgress = true
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            approvalWaiters.append(continuation)
+        }
+    }
+
+    private func finishApprovalTurn() {
+        if approvalWaiters.isEmpty {
+            approvalInProgress = false
+            return
+        }
+
+        approvalWaiters.removeFirst().resume()
     }
 }
 
