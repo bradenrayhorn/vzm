@@ -24,6 +24,10 @@ final class ManualTemporaryApprovalEngine: ApprovalEngine {
             return .unknown
         }
 
+        guard request.secrets.isEmpty else {
+            return .unknown
+        }
+
         if Date() <= deadline {
             return .approved
         }

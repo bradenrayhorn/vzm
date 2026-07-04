@@ -2,8 +2,11 @@ import Foundation
 
 enum ApprovalHeaderMasker {
     private static let safeExact: [String: Set<String>] = [
-        "accept": ["*/*"],
+        "accept-language": ["*"],
+        "cache-control": ["no-cache"],
+        "pragma": ["no-cache"],
         "connection": ["keep-alive", "close"],
+        "originator": ["pi"],
         "proxy-connection": ["keep-alive"],
         "transfer-encoding": ["chunked"],
         "content-encoding": ["identity"],
@@ -14,6 +17,7 @@ enum ApprovalHeaderMasker {
         "sec-fetch-site": ["same-origin", "cross-site"],
     ]
 
+    private static let safeAccept: Set<String> = ["text/html", "image/gif", "image/jpeg", "*/*; q=0.2", "*/*", "application/json", "text/event-stream"]
     private static let safeEncodings: Set<String> = ["zstd", "br", "gzip", "deflate", "bzip2", "xz"]
 
     static func maskSafeHeaders(for request: ProxyApprovalRequest, knownUserAgents: [String]) -> [ProxyApprovalHeader] {
@@ -45,6 +49,10 @@ enum ApprovalHeaderMasker {
             let encodings = value.split(separator: ",", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             return !encodings.isEmpty && encodings.allSatisfy { safeEncodings.contains($0) }
+        case "accept":
+            let accepts = value.split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            return !accepts.isEmpty && accepts.allSatisfy { safeAccept.contains($0) }
         case "content-length":
             return value == "0"
         case ":method":

@@ -40,6 +40,8 @@ actor ApprovalService {
         fileManager: FileManager = .default,
         engines: [any ApprovalEngine] = [
             ManualTemporaryApprovalEngine.shared,
+            GradleDistributionApprovalEngine(),
+            MavenRepositoryApprovalEngine(),
             NixCacheApprovalEngine(),
             NixGitHubApprovalEngine(),
         ]

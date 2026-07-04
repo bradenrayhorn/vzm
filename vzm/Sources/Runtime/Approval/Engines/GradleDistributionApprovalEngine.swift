@@ -1,0 +1,62 @@
+import Foundation
+
+final class GradleDistributionApprovalEngine: BaseApprovalEngine {
+    override var name: String { "GradleDistribution" }
+
+    private var approvedHeaders: [ProxyApprovalHeader]?
+
+    private static let urlRegexes: [NSRegularExpression] = [
+        try! NSRegularExpression(
+            pattern: #"^services\.gradle\.org/distributions/gradle-[0-9]{1,2}(?:\.[0-9]{1,2}){1,2}-(?:bin|all)\.zip$"#
+        ),
+        try! NSRegularExpression(
+            pattern: #"^github\.com/gradle/gradle-distributions/releases/download/v[0-9]{1,2}(?:\.[0-9]{1,2}){1,2}/gradle-[0-9]{1,2}(?:\.[0-9]{1,2}){1,2}-(?:bin|all)\.zip$"#
+        ),
+    ]
+
+    init() {
+        super.init(gateBuilders: [
+            TimeWindowApprovalGate.new(durationSeconds: 5 * 60),
+            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
+            MaxRequestsApprovalGate.new(maxRequests: 32),
+        ])
+    }
+
+    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
+        guard request.type == "REQUEST" else {
+            return .unknown
+        }
+        guard request.secrets.isEmpty else {
+            return .unknown
+        }
+        guard request.body == nil else {
+            return .unknown
+        }
+        guard request.method == "GET" else {
+            return .unknown
+        }
+        guard urlMatches(request.url) else {
+            return .unknown
+        }
+
+        if let approvedHeaders, request.headers == approvedHeaders, checkGates() {
+            return .approved
+        }
+
+        return .canBeEngineApproved
+    }
+
+    override func onEngineApproved(_ request: ProxyApprovalRequest) {
+        approvedHeaders = request.headers
+        super.onEngineApproved(request)
+    }
+
+    private func urlMatches(_ url: String) -> Bool {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+
+        return Self.urlRegexes.contains { regex in
+            regex.firstMatch(in: trimmed, range: range) != nil
+        }
+    }
+}
