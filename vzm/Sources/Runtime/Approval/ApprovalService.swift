@@ -54,6 +54,7 @@ actor ApprovalService {
             MavenRepositoryApprovalEngine(),
             NixCacheApprovalEngine(),
             NixGitHubApprovalEngine(),
+            YarnPkgApprovalEngine(),
             ApproveForeverApprovalEngine(recognizedElementStore: recognizedElementStore),
         ]
     }
