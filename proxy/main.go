@@ -877,6 +877,9 @@ func approvalBodyForRequest(r *http.Request) *approvalBody {
 	if hasExpectContinue(r) {
 		return warn("Request body uses Expect: 100-continue; body was not shown.")
 	}
+	if r.ContentLength < 0 {
+		return warn("Request body has unknown length or is streaming; body was not shown.")
+	}
 
 	body, tooLarge, err := readApprovalBody(r)
 	if err != nil {

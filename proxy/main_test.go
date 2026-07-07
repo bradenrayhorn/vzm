@@ -194,12 +194,15 @@ func TestApprovalBodyForAnyMethod(t *testing.T) {
 	}
 }
 
-func TestApprovalBodyDoesNotNeedContentLength(t *testing.T) {
+func TestApprovalBodyDoesNotReadUnknownLengthBody(t *testing.T) {
 	r := approvalBodyRequest(http.MethodPost, []byte("hello"))
 	r.ContentLength = -1
 	body := approvalBodyForRequest(r)
-	if body == nil || body.Text != "hello" || body.Warning != "" {
+	if body == nil || body.Text != "" || body.Warning == "" {
 		t.Fatalf("approvalBodyForRequest() body=%#v", body)
+	}
+	if got := readRequestBody(t, r); got != "hello" {
+		t.Fatalf("body after warning = %q", got)
 	}
 }
 
