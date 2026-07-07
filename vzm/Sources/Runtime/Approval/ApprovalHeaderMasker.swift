@@ -3,7 +3,7 @@ import Foundation
 enum ApprovalHeaderMasker {
     private static let safeExact: [String: Set<String>] = [
         "accept-language": ["*"],
-        "cache-control": ["no-cache"],
+        "cache-control": ["no-cache", "max-age=0"],
         "pragma": ["no-cache"],
         "connection": ["keep-alive", "close"],
         "originator": ["pi"],

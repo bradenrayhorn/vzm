@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -106,6 +108,38 @@ func TestApprovalHeadersForRequest(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("approvalHeadersForRequest()[%d] = %#v, want %#v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestBasicAuthSecretsAreScannedAndSubstituted(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("user:{vzm:basic-secret}"))
+	r := &http.Request{
+		Header: http.Header{
+			"Authorization": {"Basic " + encoded},
+		},
+	}
+
+	secrets, err := findRequestSecrets(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets) != 1 || secrets[0] != "basic-secret" {
+		t.Fatalf("findRequestSecrets() = %#v, want [basic-secret]", secrets)
+	}
+
+	if err := applySecretSubstitutions(r, map[string]string{"basic-secret": "s3cr3t"}); err != nil {
+		t.Fatal(err)
+	}
+	got := r.Header.Get("Authorization")
+	if !strings.HasPrefix(got, "Basic ") {
+		t.Fatalf("Authorization header = %q, want Basic auth", got)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(got, "Basic "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != "user:s3cr3t" {
+		t.Fatalf("decoded Authorization = %q, want %q", decoded, "user:s3cr3t")
 	}
 }
 

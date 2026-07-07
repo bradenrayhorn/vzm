@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -960,9 +961,10 @@ func findRequestSecrets(r *http.Request) ([]string, error) {
 
 	collectURLSecretNames(r.URL, secretSet)
 
-	for _, values := range r.Header {
+	for name, values := range r.Header {
 		for _, value := range values {
 			collectSecretNames(value, secretSet)
+			collectHeaderSecrets(name, value, secretSet)
 		}
 	}
 
@@ -1003,6 +1005,15 @@ func collectSecretNames(text string, secretSet map[string]struct{}) {
 	}
 }
 
+func collectHeaderSecrets(name, value string, secretSet map[string]struct{}) {
+	if !strings.EqualFold(name, "Authorization") {
+		return
+	}
+	if decoded, _, ok := decodeBasicAuthValue(value); ok {
+		collectSecretNames(string(decoded), secretSet)
+	}
+}
+
 func sortedSecretNames(secretSet map[string]struct{}) []string {
 	return slices.Sorted(maps.Keys(secretSet))
 }
@@ -1016,7 +1027,7 @@ func applySecretSubstitutions(r *http.Request, substitutions map[string]string) 
 
 	for key, values := range r.Header {
 		for i, value := range values {
-			values[i] = substituteSecrets(value, substitutions)
+			values[i] = substituteHeaderSecrets(key, value, substitutions)
 		}
 		r.Header[key] = values
 	}
@@ -1096,6 +1107,19 @@ func substituteSecrets(text string, substitutions map[string]string) string {
 	return string(substituteSecretsBytes([]byte(text), substitutions))
 }
 
+func substituteHeaderSecrets(name, value string, substitutions map[string]string) string {
+	if strings.EqualFold(name, "Authorization") {
+		if decoded, encoding, ok := decodeBasicAuthValue(value); ok {
+			rewritten := substituteSecretsBytes(decoded, substitutions)
+			if !bytes.Equal(rewritten, decoded) {
+				return "Basic " + encoding.EncodeToString(rewritten)
+			}
+			return value
+		}
+	}
+	return substituteSecrets(value, substitutions)
+}
+
 func substituteSecretsBytes(data []byte, substitutions map[string]string) []byte {
 	return secretPattern.ReplaceAllFunc(data, func(match []byte) []byte {
 		parts := secretPattern.FindSubmatch(match)
@@ -1108,6 +1132,22 @@ func substituteSecretsBytes(data []byte, substitutions map[string]string) []byte
 		}
 		return match
 	})
+}
+
+func decodeBasicAuthValue(value string) ([]byte, *base64.Encoding, bool) {
+	fields := strings.Fields(value)
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "Basic") {
+		return nil, nil, false
+	}
+
+	encoded := fields[1]
+	if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
+		return decoded, base64.StdEncoding, true
+	}
+	if decoded, err := base64.RawStdEncoding.DecodeString(encoded); err == nil {
+		return decoded, base64.RawStdEncoding, true
+	}
+	return nil, nil, false
 }
 
 func hasExpectContinue(r *http.Request) bool {
