@@ -92,6 +92,7 @@ open class BaseApprovalEngine: ApprovalEngine {
 
 enum EngineResult {
     case approved
+    case denied
     case userApprovalRequired(EnginePrompt)
     case unknown
 }

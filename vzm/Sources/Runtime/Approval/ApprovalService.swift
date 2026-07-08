@@ -25,6 +25,7 @@ actor ApprovalService {
 
     private enum EvaluationResult {
         case approved(request: ProxyApprovalRequest, reason: String)
+        case denied(request: ProxyApprovalRequest, reason: String)
         case needsUserApproval(PendingApproval)
     }
 
@@ -37,21 +38,27 @@ actor ApprovalService {
     }
 
     private let recognizedElementStore: RecognizedElementStore
+    private let denyEngines: [any ApprovalEngine]
     private let engines: [any ApprovalEngine]
     private var approvalInProgress = false
     private var approvalWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         fileManager: FileManager = .default,
+        denyEngines: [any ApprovalEngine]? = nil,
         engines: [any ApprovalEngine]? = nil
     ) throws {
         let recognizedElementStore = try RecognizedElementStore(fileManager: fileManager)
         self.recognizedElementStore = recognizedElementStore
+        self.denyEngines = denyEngines ?? [
+            DenyTrackingApprovalEngine(),
+        ]
         self.engines = engines ?? [
             ManualTemporaryApprovalEngine.shared,
             ChatGPTApprovalEngine(),
             GradleDistributionApprovalEngine(),
             MavenRepositoryApprovalEngine(),
+            AzureDevOpsMavenApprovalEngine(),
             NixCacheApprovalEngine(),
             NixGitHubApprovalEngine(),
             YarnPkgApprovalEngine(),
@@ -64,6 +71,9 @@ actor ApprovalService {
         case let .approved(request, reason):
             Self.logDecision(true, request: request, reason: reason)
             return true
+        case let .denied(request, reason):
+            Self.logDecision(false, request: request, reason: reason)
+            return false
         case .needsUserApproval:
             break
         }
@@ -75,6 +85,9 @@ actor ApprovalService {
         case let .approved(request, reason):
             Self.logDecision(true, request: request, reason: reason)
             return true
+        case let .denied(request, reason):
+            Self.logDecision(false, request: request, reason: reason)
+            return false
         case let .needsUserApproval(pendingApproval):
             let isApproved = await askUserForApproval(pendingApproval)
             Self.logDecision(isApproved, request: request, reason: "user")
@@ -98,6 +111,15 @@ actor ApprovalService {
             warnings.append(Self.neverSeenDomainWarning)
         }
 
+        for engine in denyEngines {
+            switch engine.handle(request) {
+            case .denied:
+                return .denied(request: request, reason: "deny engine \(engine.name)")
+            case .approved, .userApprovalRequired, .unknown:
+                break
+            }
+        }
+
         if knownDomain && request.type == "CONNECT" {
             return .approved(request: request, reason: "known CONNECT domain")
         }
@@ -109,6 +131,8 @@ actor ApprovalService {
             switch engine.handle(request) {
             case .approved:
                 return .approved(request: request, reason: "engine \(engine.name)")
+            case .denied:
+                return .denied(request: request, reason: "engine \(engine.name)")
             case let .userApprovalRequired(prompt):
                 if selectedEngine == nil {
                     selectedEngine = SelectedEngine(engine: engine, prompt: prompt)

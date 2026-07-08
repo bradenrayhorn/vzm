@@ -28,7 +28,7 @@ final class ApproveForeverApprovalEngine: BaseApprovalEngine {
         guard request.type == "REQUEST" else {
             return .unknown
         }
-        guard request.method == "GET" else {
+        guard (request.method == "GET" || request.method == "HEAD") else {
             return .unknown
         }
         guard request.secrets.isEmpty else {
