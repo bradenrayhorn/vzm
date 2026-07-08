@@ -27,6 +27,7 @@ enum ProxyServiceError: LocalizedError {
 final class ProxyService {
     private static let proxyVsockPort: UInt32 = 3128
     private static let caVsockPort: UInt32 = 3129
+    private static let timeVsockPort: UInt32 = 3131
     private static let gitVsockPort: UInt32 = 4022
 
     private let vmName: String
@@ -50,6 +51,8 @@ final class ProxyService {
     private var gitListenerDelegate: VsockUnixBridgeDelegate?
     private var caListener: VZVirtioSocketListener?
     private var caListenerDelegate: CAVsockListenerDelegate?
+    private var timeListener: VZVirtioSocketListener?
+    private var timeListenerDelegate: TimeVsockListenerDelegate?
 
     init(vmName: String) throws {
         self.vmName = vmName
@@ -110,6 +113,11 @@ final class ProxyService {
         caListener.delegate = caListenerDelegate
         virtioDevice.setSocketListener(caListener, forPort: Self.caVsockPort)
 
+        let timeListener = VZVirtioSocketListener()
+        let timeListenerDelegate = TimeVsockListenerDelegate()
+        timeListener.delegate = timeListenerDelegate
+        virtioDevice.setSocketListener(timeListener, forPort: Self.timeVsockPort)
+
         self.virtioDevice = virtioDevice
         self.proxyListener = proxyListener
         self.proxyListenerDelegate = proxyListenerDelegate
@@ -117,8 +125,10 @@ final class ProxyService {
         self.gitListenerDelegate = gitListenerDelegate
         self.caListener = caListener
         self.caListenerDelegate = caListenerDelegate
+        self.timeListener = timeListener
+        self.timeListenerDelegate = timeListenerDelegate
 
-        FileHandle.standardError.write(Data("Proxy bridge for \(vmName) listening on vsock ports \(Self.proxyVsockPort), \(Self.caVsockPort), and \(Self.gitVsockPort)\n".utf8))
+        FileHandle.standardError.write(Data("Proxy bridge for \(vmName) listening on vsock ports \(Self.proxyVsockPort), \(Self.caVsockPort), \(Self.timeVsockPort), and \(Self.gitVsockPort)\n".utf8))
     }
 
     func stop() async {
@@ -157,6 +167,7 @@ final class ProxyService {
     private func detach() {
         virtioDevice?.removeSocketListener(forPort: Self.proxyVsockPort)
         virtioDevice?.removeSocketListener(forPort: Self.caVsockPort)
+        virtioDevice?.removeSocketListener(forPort: Self.timeVsockPort)
         virtioDevice?.removeSocketListener(forPort: Self.gitVsockPort)
         virtioDevice = nil
         proxyListener = nil
@@ -165,6 +176,8 @@ final class ProxyService {
         gitListenerDelegate = nil
         caListener = nil
         caListenerDelegate = nil
+        timeListener = nil
+        timeListenerDelegate = nil
     }
 
     private func startApprovalControlSocket() async throws -> Channel {
@@ -393,6 +406,23 @@ private final class CAVsockListenerDelegate: NSObject, VZVirtioSocketListenerDel
 
         Task.detached { [caPEM, connection] in
             FileHandle(fileDescriptor: connection.fileDescriptor, closeOnDealloc: false).write(caPEM)
+            connection.close()
+        }
+
+        return true
+    }
+}
+
+private final class TimeVsockListenerDelegate: NSObject, VZVirtioSocketListenerDelegate {
+    func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection, from socketDevice: VZVirtioSocketDevice) -> Bool {
+        guard connection.fileDescriptor >= 0 else {
+            return false
+        }
+
+        Task.detached { [connection] in
+            let epochSeconds = Int(Date().timeIntervalSince1970)
+            let payload = Data("\(epochSeconds)\n".utf8)
+            FileHandle(fileDescriptor: connection.fileDescriptor, closeOnDealloc: false).write(payload)
             connection.close()
         }
 

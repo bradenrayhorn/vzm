@@ -5,6 +5,7 @@
     ./proxy.nix
     ./git-proxy.nix
     ./port-expose.nix
+    ./time.nix
     ./disks.nix
   ];
 
