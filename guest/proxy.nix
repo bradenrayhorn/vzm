@@ -20,27 +20,41 @@ let
     "-Djavax.net.ssl.trustStorePassword=changeit"
     "-Djavax.net.ssl.trustStoreType=JKS"
   ];
-  proxyEnv = {
+  baseProxyEnv = {
     HTTPS_PROXY = proxyURL;
     https_proxy = proxyURL;
     HTTP_PROXY = proxyURL;
     http_proxy = proxyURL;
-    SSL_CERT_FILE = lib.mkForce caBundle;
-    NIX_SSL_CERT_FILE = lib.mkForce caBundle;
-    CURL_CA_BUNDLE = lib.mkForce caBundle;
-    GIT_SSL_CAINFO = lib.mkForce caBundle;
-    REQUESTS_CA_BUNDLE = lib.mkForce caBundle;
-    NODE_EXTRA_CA_CERTS = lib.mkForce caBundle;
-  } // lib.optionalAttrs cfg.java.enable {
+    NO_PROXY = "127.0.0.1,localhost";
+    no_proxy = "127.0.0.1,localhost";
+    SSL_CERT_FILE = caBundle;
+    NIX_SSL_CERT_FILE = caBundle;
+    CURL_CA_BUNDLE = caBundle;
+    GIT_SSL_CAINFO = caBundle;
+    REQUESTS_CA_BUNDLE = caBundle;
+    NODE_EXTRA_CA_CERTS = caBundle;
+  };
+  proxyEnv = baseProxyEnv // lib.optionalAttrs cfg.java.enable {
     JAVA_TOOL_OPTIONS = "${javaTrustOpts} ${javaProxyOpts}";
     GRADLE_OPTS = "${javaTrustOpts} ${javaProxyOpts}";
+  };
+  systemdDefaultEnvironment = lib.concatStringsSep " " (
+    lib.mapAttrsToList (name: value: "${name}=${value}") baseProxyEnv
+  );
+  forcedCertProxyEnv = proxyEnv // {
+    SSL_CERT_FILE = lib.mkForce proxyEnv.SSL_CERT_FILE;
+    NIX_SSL_CERT_FILE = lib.mkForce proxyEnv.NIX_SSL_CERT_FILE;
+    CURL_CA_BUNDLE = lib.mkForce proxyEnv.CURL_CA_BUNDLE;
+    GIT_SSL_CAINFO = lib.mkForce proxyEnv.GIT_SSL_CAINFO;
+    REQUESTS_CA_BUNDLE = lib.mkForce proxyEnv.REQUESTS_CA_BUNDLE;
+    NODE_EXTRA_CA_CERTS = lib.mkForce proxyEnv.NODE_EXTRA_CA_CERTS;
   };
 in
 {
   options.vzm.proxy.java.enable = lib.mkEnableOption "Java proxy and MITM CA truststore support";
 
   config = {
-  environment.variables = proxyEnv;
+  environment.variables = forcedCertProxyEnv;
   nix.settings.extra-sandbox-paths = [
     caBundle
     "/run/vzm/mitm-ca.crt.pem"
@@ -51,7 +65,7 @@ in
   # `sudo nixos-rebuild switch --flake ...` works without manually prefixing
   # the command with `sudo env ...`.
   security.sudo.extraConfig = ''
-    Defaults env_keep += "HTTP_PROXY http_proxy HTTPS_PROXY https_proxy"
+    Defaults env_keep += "HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy"
     Defaults env_keep += "SSL_CERT_FILE NIX_SSL_CERT_FILE CURL_CA_BUNDLE GIT_SSL_CAINFO REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS"
     ${lib.optionalString cfg.java.enable ''Defaults env_keep += "JAVA_TOOL_OPTIONS GRADLE_OPTS"''}
   '';
@@ -98,6 +112,10 @@ in
       rm -f /run/vzm/mitm-ca.crt.pem.tmp /run/vzm/java-truststore.jks.tmp
     '';
   };
+
+  systemd.user.extraConfig = ''
+    DefaultEnvironment=${systemdDefaultEnvironment}
+  '';
 
   systemd.services.nix-daemon.environment = proxyEnv;
   systemd.services.nix-daemon.wants = [
