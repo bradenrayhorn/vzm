@@ -4,7 +4,7 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
     override var name: String { "AzureDevOpsMaven" }
 
     private var approvedRepositoryPrefix: String?
-    private var approvedHeaders: [ProxyApprovalHeader]?
+    private var approvedHeaders: Set<ProxyApprovalHeader>?
     private var approvedSecrets: Set<String>?
 
     private static let host = "pkgs.dev.azure.com"
@@ -38,8 +38,8 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
            let approvedHeaders,
            let approvedSecrets,
            repositoryPrefix == approvedRepositoryPrefix,
-           request.headers == approvedHeaders,
-           Set(request.secrets) == approvedSecrets,
+           Set(request.headers) == approvedHeaders,
+           approvedSecrets.isSuperset(of: Set(request.secrets)),
            checkGates() {
             return .approved
         }
@@ -49,8 +49,8 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
         approvedRepositoryPrefix = repositoryPrefixIfAllowedMavenURL(request.url)
-        approvedHeaders = request.headers
-        approvedSecrets = Set(request.secrets)
+        approvedHeaders = Set(request.headers)
+        approvedSecrets = (approvedSecrets ?? []).union(Set(request.secrets))
         super.onEngineApproved(request)
     }
 

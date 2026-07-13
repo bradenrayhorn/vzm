@@ -3,7 +3,7 @@ import Foundation
 final class NixCacheApprovalEngine: BaseApprovalEngine {
     override var name: String { "NixCache" }
 
-    private var approvedHeaders: [ProxyApprovalHeader]?
+    private var approvedHeaders: Set<ProxyApprovalHeader>?
 
     private static let urlRegexes: [NSRegularExpression] = [
         try! NSRegularExpression(pattern: #"^channels\.nixos\.org/flake-registry\.json$"#),
@@ -37,7 +37,7 @@ final class NixCacheApprovalEngine: BaseApprovalEngine {
             return .unknown
         }
 
-        if let approvedHeaders, request.headers == approvedHeaders, self.checkGates() {
+        if let approvedHeaders, Set(request.headers) == approvedHeaders, self.checkGates() {
             return .approved
         }
 
@@ -45,7 +45,7 @@ final class NixCacheApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = request.headers
+        approvedHeaders = Set(request.headers)
         super.onEngineApproved(request)
     }
 }

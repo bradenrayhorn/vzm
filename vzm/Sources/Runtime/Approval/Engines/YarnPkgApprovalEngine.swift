@@ -3,7 +3,7 @@ import Foundation
 final class YarnPkgApprovalEngine: BaseApprovalEngine {
     override var name: String { "YarnPkg" }
 
-    private var approvedHeaders: [ProxyApprovalHeader]?
+    private var approvedHeaders: Set<ProxyApprovalHeader>?
 
     private static let urlRegexes: [NSRegularExpression] = [
         try! NSRegularExpression(pattern: #"^yarnpkg\.com/latest-version$"#),
@@ -41,7 +41,7 @@ final class YarnPkgApprovalEngine: BaseApprovalEngine {
             return .unknown
         }
 
-        if let approvedHeaders, request.headers == approvedHeaders, checkGates() {
+        if let approvedHeaders, Set(request.headers) == approvedHeaders, checkGates() {
             return .approved
         }
 
@@ -49,7 +49,7 @@ final class YarnPkgApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = request.headers
+        approvedHeaders = Set(request.headers)
         super.onEngineApproved(request)
     }
 }

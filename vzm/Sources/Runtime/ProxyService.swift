@@ -262,7 +262,7 @@ struct ProxyApprovalRequest: Codable, Sendable {
     var secrets: [String]
 }
 
-struct ProxyApprovalHeader: Codable, Sendable, Equatable {
+struct ProxyApprovalHeader: Codable, Sendable, Hashable {
     var name: String
     var value: String
 }

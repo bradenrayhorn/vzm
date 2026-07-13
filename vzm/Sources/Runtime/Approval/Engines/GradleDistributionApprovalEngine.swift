@@ -3,7 +3,7 @@ import Foundation
 final class GradleDistributionApprovalEngine: BaseApprovalEngine {
     override var name: String { "GradleDistribution" }
 
-    private var approvedHeaders: [ProxyApprovalHeader]?
+    private var approvedHeaders: Set<ProxyApprovalHeader>?
 
     private static let urlRegexes: [NSRegularExpression] = [
         try! NSRegularExpression(
@@ -39,7 +39,7 @@ final class GradleDistributionApprovalEngine: BaseApprovalEngine {
             return .unknown
         }
 
-        if let approvedHeaders, request.headers == approvedHeaders, checkGates() {
+        if let approvedHeaders, Set(request.headers) == approvedHeaders, checkGates() {
             return .approved
         }
 
@@ -47,7 +47,7 @@ final class GradleDistributionApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = request.headers
+        approvedHeaders = Set(request.headers)
         super.onEngineApproved(request)
     }
 }

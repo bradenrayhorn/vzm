@@ -3,7 +3,7 @@ import Foundation
 final class NixGitHubApprovalEngine: BaseApprovalEngine {
     override var name: String { "NixGitHub" }
 
-    private var approvedHeaders: [ProxyApprovalHeader]?
+    private var approvedHeaders: Set<ProxyApprovalHeader>?
 
     private static let urlRegexes: [NSRegularExpression] = [
         try! NSRegularExpression(pattern: #"^github\.com/[A-Za-z0-9-]{1,40}/[A-Za-z0-9-]{1,40}/archive/[0-9a-f]{40}\.tar\.gz$"#),
@@ -35,7 +35,7 @@ final class NixGitHubApprovalEngine: BaseApprovalEngine {
             return .unknown
         }
 
-        if let approvedHeaders, request.headers == approvedHeaders, self.checkGates() {
+        if let approvedHeaders, Set(request.headers) == approvedHeaders, self.checkGates() {
             return .approved
         }
 
@@ -43,7 +43,7 @@ final class NixGitHubApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = request.headers
+        approvedHeaders = Set(request.headers)
         super.onEngineApproved(request)
     }
 }
