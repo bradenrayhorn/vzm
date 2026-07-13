@@ -5,6 +5,7 @@ final class DenyTrackingApprovalEngine: BaseApprovalEngine {
 
     private static let blockedDomains = [
         "telemetry.nextjs.org",
+        "config.liquibase.com"
     ]
 
     override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
