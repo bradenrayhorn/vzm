@@ -18,12 +18,12 @@ in
   ];
 
   nixpkgs.hostPlatform = lib.mkDefault "aarch64-linux";
-  system.stateVersion = "25.11";
+  system.stateVersion = "26.05";
 
   boot.loader.grub.enable = false;
   boot.loader.systemd-boot.enable = false;
   boot.loader.efi.canTouchEfiVariables = false;
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  boot.kernelPackages = pkgs.linuxPackages;
   boot.supportedFilesystems.zfs = lib.mkForce false;
 
   boot.initrd.availableKernelModules = [
