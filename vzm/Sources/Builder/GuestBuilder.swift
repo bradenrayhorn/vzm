@@ -12,7 +12,7 @@ struct GuestBuilderOptions {
     let sourceURL: URL
 
     let attribute: String = "guest-bundle"
-    let workDiskSizeBytes: UInt64 = 64 * 1024 * 1024 * 1024
+    let workDiskSizeBytes: UInt64 = 96 * 1024 * 1024 * 1024
     let cpuCount: Int = 4
     let memorySizeBytes: UInt64 = 8 * 1024 * 1024 * 1024
 }
