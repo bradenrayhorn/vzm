@@ -12,9 +12,9 @@ struct GuestBuilderOptions {
     let sourceURL: URL
 
     let attribute: String = "guest-bundle"
-    let workDiskSizeBytes: UInt64 = 64 * 1024 * 1024 * 1024
-    let cpuCount: Int = 4
-    let memorySizeBytes: UInt64 = 8 * 1024 * 1024 * 1024
+    let rootDiskSizeBytes: UInt64 = 64 * 1024 * 1024 * 1024
+    let cpuCount: Int = 8
+    let memorySizeBytes: UInt64 = 10 * 1024 * 1024 * 1024
 }
 
 struct GuestBuilderStatus: Codable {
@@ -47,7 +47,7 @@ enum GuestBuilderError: LocalizedError {
     case missingRequiredFiles(URL, [String])
     case invalidBuilderManifest(String)
     case unsupportedBuilderRoot(String)
-    case invalidWorkDiskSize(UInt64)
+    case invalidRootDiskSize(UInt64)
     case invalidCPUCount(Int)
     case invalidMemorySize(UInt64)
     case missingStatus(URL)
@@ -65,8 +65,8 @@ enum GuestBuilderError: LocalizedError {
             return "Invalid builder root manifest: \(message)"
         case .unsupportedBuilderRoot(let message):
             return "Unsupported builder root: \(message)"
-        case .invalidWorkDiskSize(let size):
-            return "Invalid work disk size: \(size) bytes"
+        case .invalidRootDiskSize(let size):
+            return "Invalid root disk size: \(size) bytes"
         case .invalidCPUCount(let count):
             return "Invalid CPU count: \(count)"
         case .invalidMemorySize(let size):
@@ -98,13 +98,13 @@ final class GuestBuilder {
         let workspace = try prepareWorkspace()
 
         try copySource(from: options.sourceURL, to: workspace.sourceURL)
-        try createWorkDisk(at: workspace.workDiskURL, sizeBytes: options.workDiskSizeBytes)
+        try createRootDisk(at: workspace.rootDiskURL, sizeBytes: options.rootDiskSizeBytes)
         try writeRequest(to: workspace.requestURL)
 
         GuestBuilderLog.info("Builder workspace: \(workspace.directoryURL.path)")
         GuestBuilderLog.info("Launching builder VM...")
 
-        try await runBuilderVM(builderRoot: builderRoot, workspaceURL: workspace.directoryURL, workDiskURL: workspace.workDiskURL)
+        try await runBuilderVM(builderRoot: builderRoot, workspaceURL: workspace.directoryURL, rootDiskURL: workspace.rootDiskURL)
         let status = try readStatus(from: workspace.statusURL, workspaceURL: workspace.directoryURL)
 
         guard status.status == "success", status.exitCode == 0 else {
@@ -116,8 +116,8 @@ final class GuestBuilder {
     }
 
     private func validateOptions() throws {
-        guard options.workDiskSizeBytes > 0 else {
-            throw GuestBuilderError.invalidWorkDiskSize(options.workDiskSizeBytes)
+        guard options.rootDiskSizeBytes > 0 else {
+            throw GuestBuilderError.invalidRootDiskSize(options.rootDiskSizeBytes)
         }
         guard options.cpuCount > 0 else {
             throw GuestBuilderError.invalidCPUCount(options.cpuCount)
@@ -174,7 +174,7 @@ final class GuestBuilder {
         for url in [
             workspace.sourceURL,
             workspace.outputURL,
-            workspace.workDiskURL,
+            workspace.rootDiskURL,
             workspace.requestURL,
             workspace.statusURL,
             workspace.statusTemporaryURL,
@@ -193,8 +193,8 @@ final class GuestBuilder {
         try fileManager.copyItem(at: resolvedSourceURL, to: destinationURL)
     }
 
-    private func createWorkDisk(at url: URL, sizeBytes: UInt64) throws {
-        GuestBuilderLog.info("Creating sparse work disk: \(url.path) (\(sizeBytes / 1024 / 1024 / 1024) GiB)")
+    private func createRootDisk(at url: URL, sizeBytes: UInt64) throws {
+        GuestBuilderLog.info("Creating sparse root disk: \(url.path) (\(sizeBytes / 1024 / 1024 / 1024) GiB)")
         try SparseDiskImage.create(at: url, sizeBytes: sizeBytes, fileManager: fileManager)
     }
 
@@ -212,11 +212,11 @@ final class GuestBuilder {
         try data.write(to: url, options: .atomic)
     }
 
-    private func runBuilderVM(builderRoot: BuilderRootBundle, workspaceURL: URL, workDiskURL: URL) async throws {
+    private func runBuilderVM(builderRoot: BuilderRootBundle, workspaceURL: URL, rootDiskURL: URL) async throws {
         let configuration = try buildVirtualMachineConfiguration(
             builderRoot: builderRoot,
             workspaceURL: workspaceURL,
-            workDiskURL: workDiskURL
+            rootDiskURL: rootDiskURL
         )
 
         let machine = VZVirtualMachine(configuration: configuration)
@@ -265,7 +265,7 @@ final class GuestBuilder {
         }
     }
 
-    private func buildVirtualMachineConfiguration(builderRoot: BuilderRootBundle, workspaceURL: URL, workDiskURL: URL) throws -> VZVirtualMachineConfiguration {
+    private func buildVirtualMachineConfiguration(builderRoot: BuilderRootBundle, workspaceURL: URL, rootDiskURL: URL) throws -> VZVirtualMachineConfiguration {
         let configuration = VZVirtualMachineConfiguration()
 
         configuration.platform = VZGenericPlatformConfiguration()
@@ -282,11 +282,18 @@ final class GuestBuilder {
         )
         configuration.serialPorts = [console]
 
-        let rootAttachment = try VZDiskImageStorageDeviceAttachment(url: builderRoot.rootfsURL, readOnly: true)
-        let workAttachment = try VZDiskImageStorageDeviceAttachment(url: workDiskURL, readOnly: false)
+        let storeAttachment = try VZDiskImageStorageDeviceAttachment(url: builderRoot.rootfsURL, readOnly: true)
+        let rootAttachment = try VZDiskImageStorageDeviceAttachment(
+            url: rootDiskURL,
+            readOnly: false,
+            cachingMode: .automatic,
+            synchronizationMode: .fsync
+        )
+        let rootDevice = VZVirtioBlockDeviceConfiguration(attachment: rootAttachment)
+        rootDevice.blockDeviceIdentifier = "vzm-root"
         configuration.storageDevices = [
-            VZVirtioBlockDeviceConfiguration(attachment: rootAttachment),
-            VZVirtioBlockDeviceConfiguration(attachment: workAttachment),
+            VZVirtioBlockDeviceConfiguration(attachment: storeAttachment),
+            rootDevice,
         ]
 
         let network = VZVirtioNetworkDeviceConfiguration()
@@ -353,7 +360,7 @@ struct GuestBuilderWorkspace {
 
     var sourceURL: URL { directoryURL.appendingPathComponent("source", isDirectory: true) }
     var outputURL: URL { directoryURL.appendingPathComponent("output", isDirectory: true) }
-    var workDiskURL: URL { directoryURL.appendingPathComponent("work.raw") }
+    var rootDiskURL: URL { directoryURL.appendingPathComponent("root.raw") }
     var requestURL: URL { directoryURL.appendingPathComponent("request.json") }
     var statusURL: URL { directoryURL.appendingPathComponent("status.json") }
     var statusTemporaryURL: URL { directoryURL.appendingPathComponent("status.json.tmp") }

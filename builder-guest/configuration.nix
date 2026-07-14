@@ -3,9 +3,15 @@
   pkgs,
   lib,
   config,
+  utils,
   builderAgent,
   ...
 }:
+let
+  rootDevice = "/dev/disk/by-id/virtio-vzm-root";
+  rootDeviceUnit = "${utils.escapeSystemdPath rootDevice}.device";
+  rootFsckUnit = "systemd-fsck-root.service";
+in
 {
   imports = [
     (modulesPath + "/profiles/qemu-guest.nix")
@@ -43,49 +49,56 @@
   ];
   boot.extraModulePackages = [ ];
 
-  # The host should attach a blank writable disk as /dev/vdb.  Stage 1 formats
-  # it on first boot and uses it as the overlay upper/workdir for /nix/store so
-  # Nix builds do not consume the VM's RAM-backed root filesystem.
-  boot.initrd.extraUtilsCommands = ''
-    copy_bin_and_libs ${pkgs.e2fsprogs}/bin/mke2fs
-    copy_bin_and_libs ${pkgs.e2fsprogs}/bin/mkfs.ext4
-    copy_bin_and_libs ${pkgs.util-linux}/bin/blkid
-  '';
+  # Ephemeral root: vzm attaches a fresh sparse host-backed disk for each build.
+  # Systemd stage 1 formats it if needed and mounts it as the writable root.
+  boot.initrd.systemd.extraBin = {
+    blkid = "${pkgs.util-linux}/bin/blkid";
+    mke2fs = "${pkgs.e2fsprogs}/bin/mke2fs";
+    "mkfs.ext4" = "${pkgs.e2fsprogs}/bin/mkfs.ext4";
+  };
 
-  boot.initrd.postDeviceCommands = lib.mkBefore ''
-    if [ ! -b /dev/vdb ]; then
-      echo "vzm-builder: missing writable work disk at /dev/vdb" >&2
-      exit 1
-    fi
+  boot.initrd.systemd.services.vzm-format-root = {
+    description = "Format vzm builder ephemeral root disk";
+    requiredBy = [ "sysroot.mount" ];
+    requires = [ rootDeviceUnit ];
+    after = [ rootDeviceUnit ];
+    before = [
+      rootFsckUnit
+      "sysroot.mount"
+      "shutdown.target"
+    ];
+    conflicts = [ "shutdown.target" ];
+    unitConfig.DefaultDependencies = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      root_device=${lib.escapeShellArg rootDevice}
 
-    if ! blkid /dev/vdb >/dev/null 2>&1; then
-      echo "vzm-builder: formatting /dev/vdb as ext4"
-      mkfs.ext4 -F -L vzm-work /dev/vdb
-    fi
+      if [ ! -b "$root_device" ]; then
+        echo "vzm-builder: missing ephemeral root disk at $root_device" >&2
+        exit 1
+      fi
 
-    mkdir -p /tmp/vzm-rw-store
-    mount -t ext4 /dev/vdb /tmp/vzm-rw-store
-    mkdir -p /tmp/vzm-rw-store/store /tmp/vzm-rw-store/work
-    umount /tmp/vzm-rw-store
-  '';
+      if ! blkid "$root_device" >/dev/null 2>&1; then
+        echo "vzm-builder: formatting ephemeral root disk"
+        mkfs.ext4 -F -L vzm-root "$root_device"
+      fi
+    '';
+  };
 
   fileSystems."/" = {
-    device = "none";
-    fsType = "tmpfs";
-    options = [ "mode=0755" ];
+    device = rootDevice;
+    fsType = "ext4";
+    options = [ "rw" "noatime" ];
+    neededForBoot = true;
   };
 
   fileSystems."/nix/.ro-store" = {
     device = "/dev/vda";
     fsType = "squashfs";
     options = [ "ro" ];
-    neededForBoot = true;
-  };
-
-  fileSystems."/nix/.rw-store" = {
-    device = "/dev/vdb";
-    fsType = "ext4";
-    options = [ "rw" "noatime" ];
     neededForBoot = true;
   };
 
@@ -134,13 +147,8 @@
   systemd.services.register-nix-store = {
     description = "Register immutable squashfs Nix store paths";
     unitConfig.DefaultDependencies = false;
-    wantedBy = [ "sysinit.target" ];
-    before = [
-      "sysinit.target"
-      "shutdown.target"
-      "nix-daemon.socket"
-      "nix-daemon.service"
-    ];
+    wantedBy = [ "multi-user.target" ];
+    before = [ "shutdown.target" ];
     after = [ "local-fs.target" ];
     conflicts = [ "shutdown.target" ];
     restartIfChanged = false;
@@ -153,6 +161,11 @@
       touch /etc/NIXOS
       ${lib.getExe' config.nix.package "nix-env"} -p /nix/var/nix/profiles/system --set /run/current-system
     '';
+  };
+
+  systemd.services.nix-daemon = {
+    requires = [ "register-nix-store.service" ];
+    after = [ "register-nix-store.service" ];
   };
 
   networking.useDHCP = true;
