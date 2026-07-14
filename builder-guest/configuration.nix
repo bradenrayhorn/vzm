@@ -108,6 +108,7 @@
 
   systemd.tmpfiles.rules = [
     "d /run/vzm-builder 0755 root root -"
+    "d /nix/.rw-store/build 1777 root root -"
   ];
 
   nix.settings = {
@@ -117,6 +118,9 @@
     ];
     accept-flake-config = true;
     trusted-users = [ "root" ];
+    # Keep large source extractions and other build intermediates off the
+    # RAM-backed root filesystem. This path lives on the ext4 work disk.
+    build-dir = "/nix/.rw-store/build";
     max-jobs = "auto";
     cores = 0;
   };
