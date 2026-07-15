@@ -41,7 +41,7 @@ final class YarnPkgApprovalEngine: BaseApprovalEngine {
             return .unknown
         }
 
-        if let approvedHeaders, Set(request.headers) == approvedHeaders, checkGates() {
+        if let approvedHeaders, approvedHeaders.isSuperset(of: Set(request.headers)), checkGates() {
             return .approved
         }
 
@@ -49,7 +49,7 @@ final class YarnPkgApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = Set(request.headers)
+        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
         super.onEngineApproved(request)
     }
 }

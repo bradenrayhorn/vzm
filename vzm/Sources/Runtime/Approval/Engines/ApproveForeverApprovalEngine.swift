@@ -71,7 +71,7 @@ final class ApproveForeverApprovalEngine: BaseApprovalEngine {
         do {
             try recognizedElementStore.insert(ApprovedForeverRequest(method: request.method, url: request.url).normalize(), type: .approvedForeverRequest)
         } catch {
-            FileHandle.standardError.write(Data("Failed to persist forever-approved request \(request.method) \(request.url): \(error)\n".utf8))
+            StandardError.writeLine("Failed to persist forever-approved request \(request.method) \(request.url): \(error)")
         }
     }
 }

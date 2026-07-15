@@ -40,7 +40,7 @@ final class MavenRepositoryApprovalEngine: BaseApprovalEngine {
             return .unknown
         }
 
-        if let approvedHeaders, Set(request.headers) == approvedHeaders, self.checkGates() {
+        if let approvedHeaders, approvedHeaders.isSuperset(of: Set(request.headers)), self.checkGates() {
             return .approved
         }
 
@@ -48,7 +48,7 @@ final class MavenRepositoryApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = Set(request.headers)
+        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
         super.onEngineApproved(request)
     }
 

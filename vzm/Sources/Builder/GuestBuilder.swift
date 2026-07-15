@@ -3,7 +3,7 @@ import Virtualization
 
 enum GuestBuilderLog {
     static func info(_ message: String) {
-        FileHandle.standardError.write(Data((message + "\n").utf8))
+        StandardError.writeLine(message)
     }
 }
 

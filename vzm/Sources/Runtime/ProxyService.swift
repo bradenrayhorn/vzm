@@ -128,7 +128,7 @@ final class ProxyService {
         self.timeListener = timeListener
         self.timeListenerDelegate = timeListenerDelegate
 
-        FileHandle.standardError.write(Data("Proxy bridge for \(vmName) listening on vsock ports \(Self.proxyVsockPort), \(Self.caVsockPort), \(Self.timeVsockPort), and \(Self.gitVsockPort)\n".utf8))
+        StandardError.writeLine("Proxy bridge for \(vmName) listening on vsock ports \(Self.proxyVsockPort), \(Self.caVsockPort), \(Self.timeVsockPort), and \(Self.gitVsockPort)")
     }
 
     func stop() async {
@@ -287,7 +287,7 @@ private func proxyApprovalResponse(for request: ProxyApprovalRequest) async -> P
         let substitutions = try resolveSecretSubstitutions(for: request)
         return ProxyApprovalResponse(id: request.id, approved: true, substitutions: substitutions)
     } catch {
-        FileHandle.standardError.write(Data("Denied proxy request because secrets could not be resolved: \(error)\n".utf8))
+        StandardError.writeLine("Denied proxy request because secrets could not be resolved: \(error)")
         return ProxyApprovalResponse(id: request.id, approved: false, substitutions: [:])
     }
 }

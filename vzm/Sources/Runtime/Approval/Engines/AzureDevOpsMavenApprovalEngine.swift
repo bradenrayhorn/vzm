@@ -38,7 +38,7 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
            let approvedHeaders,
            let approvedSecrets,
            repositoryPrefix == approvedRepositoryPrefix,
-           Set(request.headers) == approvedHeaders,
+           approvedHeaders.isSuperset(of: Set(request.headers)),
            approvedSecrets.isSuperset(of: Set(request.secrets)),
            checkGates() {
             return .approved
@@ -49,7 +49,7 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
         approvedRepositoryPrefix = repositoryPrefixIfAllowedMavenURL(request.url)
-        approvedHeaders = Set(request.headers)
+        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
         approvedSecrets = (approvedSecrets ?? []).union(Set(request.secrets))
         super.onEngineApproved(request)
     }

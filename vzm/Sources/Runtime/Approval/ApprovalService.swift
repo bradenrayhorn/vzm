@@ -34,7 +34,7 @@ actor ApprovalService {
     private static func logDecision(_ approved: Bool, request: ProxyApprovalRequest, reason: String) {
         let decision = approved ? "approved" : "denied"
         let timestamp = Date().ISO8601Format()
-        FileHandle.standardError.write(Data("[\(timestamp)] approval \(decision) (\(reason)): \(request.method) \(request.url)\n".utf8))
+        StandardError.writeLine("[\(timestamp)] approval \(decision) (\(reason)): \(request.method) \(request.url)")
     }
 
     private let recognizedElementStore: RecognizedElementStore
@@ -52,10 +52,12 @@ actor ApprovalService {
         self.recognizedElementStore = recognizedElementStore
         self.denyEngines = denyEngines ?? [
             DenyTrackingApprovalEngine(),
+            DenyJetBrainsOptionalServicesApprovalEngine(),
         ]
         self.engines = engines ?? [
             ManualTemporaryApprovalEngine.shared,
             ChatGPTApprovalEngine(),
+            IntelliJApprovalEngine(),
             GradleDistributionApprovalEngine(),
             MavenRepositoryApprovalEngine(),
             AzureDevOpsMavenApprovalEngine(),
@@ -167,7 +169,7 @@ actor ApprovalService {
                 do {
                     try recognizedElementStore.insert(userAgent, type: .userAgent)
                 } catch {
-                    FileHandle.standardError.write(Data("Failed to persist approved User-Agent \(userAgent): \(error)\n".utf8))
+                    StandardError.writeLine("Failed to persist approved User-Agent \(userAgent): \(error)")
                 }
             }
 
@@ -182,7 +184,7 @@ actor ApprovalService {
             do {
                 try recognizedElementStore.insert(request.domain, type: .domain)
             } catch {
-                FileHandle.standardError.write(Data("Failed to persist approved CONNECT domain \(request.domain): \(error)\n".utf8))
+                StandardError.writeLine("Failed to persist approved CONNECT domain \(request.domain): \(error)")
             }
         }
 
