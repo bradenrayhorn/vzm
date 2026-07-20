@@ -14,8 +14,7 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
 
     init() {
         super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 5 * 60),
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
+            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 1800),
             RateLimitApprovalGate.new(windowSeconds: 30, maxRequests: 120),
         ])
     }

@@ -17,9 +17,9 @@ final class MavenRepositoryApprovalEngine: BaseApprovalEngine {
 
     init() {
         super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 5 * 60),
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
-            RateLimitApprovalGate.new(windowSeconds: 30, maxRequests: 60),
+            TimeWindowApprovalGate.new(durationSeconds: 10 * 60),
+            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 60),
+            RateLimitApprovalGate.new(windowSeconds: 30, maxRequests: 240),
         ])
     }
 
