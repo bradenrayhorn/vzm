@@ -61,6 +61,7 @@ actor ApprovalService {
             GradleDistributionApprovalEngine(),
             MavenRepositoryApprovalEngine(),
             AzureDevOpsMavenApprovalEngine(),
+            DockerHubApprovalEngine(),
             NixCacheApprovalEngine(),
             NixGitHubApprovalEngine(),
             YarnPkgApprovalEngine(),
