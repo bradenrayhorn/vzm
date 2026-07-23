@@ -103,6 +103,14 @@ class Runner {
 
         let proxyService = try ProxyService(vmName: vmBundle.manifest.name)
         var portExposureService: PortExposureService?
+        var notificationService: NotificationService?
+
+        func stopRuntimeServices() async {
+            PortExposureCoordinator.shared.detach()
+            notificationService?.stop()
+            await portExposureService?.stop()
+            await proxyService.stop()
+        }
 
         do {
             try await proxyService.launch()
@@ -133,6 +141,8 @@ class Runner {
             portExposureService = exposureService
             PortExposureCoordinator.shared.attach(service: exposureService)
 
+            notificationService = NotificationService(virtioDevice: virtioDevice)
+
             let sshListener = TCPVirtioForwardListener(
                 hostPort: vmBundle.manifest.sshPort,
                 target: .directVsock(port: 22),
@@ -160,7 +170,7 @@ class Runner {
                 try await group.next()
             }
         } catch {
-            await stopRuntimeServices(portExposureService: portExposureService, proxyService: proxyService)
+            await stopRuntimeServices()
             if machine.canStop {
                 try? await stopImmediately()
                 stopDelegate.hostDidStop()
@@ -168,13 +178,7 @@ class Runner {
             throw error
         }
 
-        await stopRuntimeServices(portExposureService: portExposureService, proxyService: proxyService)
-    }
-
-    private func stopRuntimeServices(portExposureService: PortExposureService?, proxyService: ProxyService) async {
-        PortExposureCoordinator.shared.detach()
-        await portExposureService?.stop()
-        await proxyService.stop()
+        await stopRuntimeServices()
     }
 
     private func stopFromInterrupt(force: Bool) async {
