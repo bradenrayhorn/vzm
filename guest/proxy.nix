@@ -49,12 +49,43 @@ let
     REQUESTS_CA_BUNDLE = lib.mkForce proxyEnv.REQUESTS_CA_BUNDLE;
     NODE_EXTRA_CA_CERTS = lib.mkForce proxyEnv.NODE_EXTRA_CA_CERTS;
   };
+  tcpForward = pkgs.writeShellApplication {
+    name = "vzm-forward";
+    runtimeInputs = [ pkgs.socat ];
+    text = ''
+      if [ "$#" -ne 2 ]; then
+        echo "Usage: vzm-forward LOCAL_PORT HOST:PORT" >&2
+        exit 2
+      fi
+
+      local_port=$1
+      target=$2
+      case "$target" in
+        *:*) target_host=''${target%:*}; target_port=''${target##*:} ;;
+        *) echo "vzm-forward: target must be HOST:PORT" >&2; exit 2 ;;
+      esac
+
+      case "$local_port" in *[!0-9]*|"") echo "vzm-forward: invalid local port" >&2; exit 2 ;; esac
+      case "$target_port" in *[!0-9]*|"") echo "vzm-forward: invalid target port" >&2; exit 2 ;; esac
+      case "$target_host" in *[!A-Za-z0-9.-]*|"") echo "vzm-forward: invalid target host" >&2; exit 2 ;; esac
+      if [ "$local_port" -lt 1 ] || [ "$local_port" -gt 65535 ] || [ "$target_port" -lt 1 ] || [ "$target_port" -gt 65535 ]; then
+        echo "vzm-forward: ports must be between 1 and 65535" >&2
+        exit 2
+      fi
+
+      echo "Forwarding 127.0.0.1:$local_port to $target_host:$target_port through VZM" >&2
+      exec socat \
+        "TCP-LISTEN:$local_port,bind=127.0.0.1,reuseaddr,fork" \
+        "PROXY:127.0.0.1:$target_host:$target_port,proxyport=3130"
+    '';
+  };
 in
 {
   options.vzm.proxy.java.enable = lib.mkEnableOption "Java proxy and MITM CA truststore support";
 
   config = {
   environment.variables = forcedCertProxyEnv;
+  environment.systemPackages = [ tcpForward ];
   nix.settings.extra-sandbox-paths = [
     caBundle
     "/run/vzm/mitm-ca.crt.pem"
@@ -126,6 +157,17 @@ in
     "vzm-mitm-ca.service"
     "vzm-https-proxy.service"
   ];
+
+  systemd.services.vzm-tcp-proxy = {
+    description = "VZM raw TCP proxy bridge";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "simple";
+      Restart = "always";
+      RestartSec = "1s";
+      ExecStart = "${pkgs.socat}/bin/socat TCP-LISTEN:3130,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:2:3130";
+    };
+  };
 
   systemd.services.vzm-https-proxy = {
     description = "VZM HTTPS proxy bridge";

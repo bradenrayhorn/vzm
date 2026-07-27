@@ -74,13 +74,17 @@ private final class NotificationVsockListenerDelegate: NSObject, VZVirtioSocketL
         shouldAcceptNewConnection connection: VZVirtioSocketConnection,
         from socketDevice: VZVirtioSocketDevice
     ) -> Bool {
-        guard connection.fileDescriptor >= 0 else {
+        let fileDescriptor = connection.fileDescriptor
+        guard fileDescriptor >= 0 else { return false }
+
+        let flags = fcntl(fileDescriptor, F_GETFL)
+        guard flags >= 0, fcntl(fileDescriptor, F_SETFL, flags & ~O_NONBLOCK) == 0 else {
             return false
         }
 
         var timeout = timeval(tv_sec: Self.requestTimeoutSeconds, tv_usec: 0)
         setsockopt(
-            connection.fileDescriptor,
+            fileDescriptor,
             SOL_SOCKET,
             SO_RCVTIMEO,
             &timeout,

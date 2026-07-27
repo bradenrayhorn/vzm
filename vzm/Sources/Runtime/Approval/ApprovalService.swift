@@ -30,6 +30,7 @@ actor ApprovalService {
     }
 
     private static let neverSeenDomainWarning = "Warning: new domain."
+    private static let rawTCPWarning = "Warning: raw TCP payloads cannot be inspected; every connection requires approval and credentials and database operations are not approved individually."
 
     private static func logDecision(_ approved: Bool, request: ProxyApprovalRequest, reason: String) {
         let decision = approved ? "approved" : "denied"
@@ -100,7 +101,8 @@ actor ApprovalService {
 
     private func evaluate(request: ProxyApprovalRequest) -> EvaluationResult {
         var request = request
-        let knownDomain = !request.domain.isEmpty && recognizedElementStore.contains(request.domain, type: .domain)
+        let isRawTCP = request.type == "TCP_CONNECT"
+        let knownDomain = !isRawTCP && !request.domain.isEmpty && recognizedElementStore.contains(request.domain, type: .domain)
         let userAgents = ApprovalHeaderMasker.getUserAgents(for: request)
         let knownUserAgents = userAgents.filter { recognizedElementStore.contains($0, type: .userAgent) }
 
@@ -110,8 +112,11 @@ actor ApprovalService {
             warnings.append(bodyWarning)
         }
 
-        if !request.domain.isEmpty && !knownDomain {
+        if !isRawTCP && !request.domain.isEmpty && !knownDomain {
             warnings.append(Self.neverSeenDomainWarning)
+        }
+        if isRawTCP {
+            warnings.append(Self.rawTCPWarning)
         }
 
         for engine in denyEngines {
@@ -128,6 +133,22 @@ actor ApprovalService {
         }
 
         request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: knownUserAgents)
+
+        // Raw TCP payloads cannot be inspected, so every connection must be
+        // explicitly approved by the user. Do not allow an approval engine to
+        // auto-approve it.
+        if isRawTCP {
+            return .needsUserApproval(
+                PendingApproval(
+                    request: request,
+                    selectedEngine: nil,
+                    warnings: warnings,
+                    knownDomain: false,
+                    userAgents: userAgents,
+                    knownUserAgents: knownUserAgents
+                )
+            )
+        }
 
         var selectedEngine: SelectedEngine?
         for engine in engines {
@@ -181,7 +202,7 @@ actor ApprovalService {
             pendingApproval.selectedEngine?.engine.onEngineApproved(request)
         }
 
-        if action.isApproved && !pendingApproval.knownDomain {
+        if action.isApproved && !pendingApproval.knownDomain && request.type != "TCP_CONNECT" {
             do {
                 try recognizedElementStore.insert(request.domain, type: .domain)
             } catch {

@@ -27,6 +27,7 @@ enum ProxyServiceError: LocalizedError {
 final class ProxyService {
     private static let proxyVsockPort: UInt32 = 3128
     private static let caVsockPort: UInt32 = 3129
+    private static let rawTCPVsockPort: UInt32 = 3130
     private static let timeVsockPort: UInt32 = 3131
     private static let gitVsockPort: UInt32 = 4022
 
@@ -34,6 +35,7 @@ final class ProxyService {
     private let proxyExecutableURL: URL
     private let runDirectoryURL: URL
     private let proxySocketURL: URL
+    private let rawTCPSocketURL: URL
     private let gitSocketURL: URL
     private let controlSocketURL: URL
     private let caCertificateURL: URL
@@ -47,6 +49,8 @@ final class ProxyService {
     private weak var virtioDevice: VZVirtioSocketDevice?
     private var proxyListener: VZVirtioSocketListener?
     private var proxyListenerDelegate: VsockUnixBridgeDelegate?
+    private var rawTCPListener: VZVirtioSocketListener?
+    private var rawTCPListenerDelegate: VsockUnixBridgeDelegate?
     private var gitListener: VZVirtioSocketListener?
     private var gitListenerDelegate: VsockUnixBridgeDelegate?
     private var caListener: VZVirtioSocketListener?
@@ -59,6 +63,7 @@ final class ProxyService {
         self.proxyExecutableURL = try Self.locateProxyExecutable()
         self.runDirectoryURL = try Self.createRunDirectory()
         self.proxySocketURL = runDirectoryURL.appendingPathComponent("p.sock")
+        self.rawTCPSocketURL = runDirectoryURL.appendingPathComponent("tcp.sock")
         self.gitSocketURL = runDirectoryURL.appendingPathComponent("git.sock")
         self.controlSocketURL = runDirectoryURL.appendingPathComponent("control.sock")
         self.caCertificateURL = runDirectoryURL.appendingPathComponent("ca.pem")
@@ -71,6 +76,7 @@ final class ProxyService {
         process.executableURL = proxyExecutableURL
         process.arguments = [
             "--listen-unix", proxySocketURL.path,
+            "--tcp-listen-unix", rawTCPSocketURL.path,
             "--git-listen-unix", gitSocketURL.path,
             "--ca-cert", caCertificateURL.path,
             "--control-unix", controlSocketURL.path,
@@ -100,6 +106,14 @@ final class ProxyService {
         proxyListener.delegate = proxyListenerDelegate
         virtioDevice.setSocketListener(proxyListener, forPort: Self.proxyVsockPort)
 
+        let rawTCPListener = VZVirtioSocketListener()
+        let rawTCPListenerDelegate = VsockUnixBridgeDelegate(
+            unixSocketPath: rawTCPSocketURL.path,
+            eventLoopGroup: eventLoopGroup
+        )
+        rawTCPListener.delegate = rawTCPListenerDelegate
+        virtioDevice.setSocketListener(rawTCPListener, forPort: Self.rawTCPVsockPort)
+
         let gitListener = VZVirtioSocketListener()
         let gitListenerDelegate = VsockUnixBridgeDelegate(
             unixSocketPath: gitSocketURL.path,
@@ -121,6 +135,8 @@ final class ProxyService {
         self.virtioDevice = virtioDevice
         self.proxyListener = proxyListener
         self.proxyListenerDelegate = proxyListenerDelegate
+        self.rawTCPListener = rawTCPListener
+        self.rawTCPListenerDelegate = rawTCPListenerDelegate
         self.gitListener = gitListener
         self.gitListenerDelegate = gitListenerDelegate
         self.caListener = caListener
@@ -128,7 +144,7 @@ final class ProxyService {
         self.timeListener = timeListener
         self.timeListenerDelegate = timeListenerDelegate
 
-        StandardError.writeLine("Proxy bridge for \(vmName) listening on vsock ports \(Self.proxyVsockPort), \(Self.caVsockPort), \(Self.timeVsockPort), and \(Self.gitVsockPort)")
+        StandardError.writeLine("Proxy bridge for \(vmName) listening on vsock ports \(Self.proxyVsockPort), \(Self.caVsockPort), \(Self.rawTCPVsockPort), \(Self.timeVsockPort), and \(Self.gitVsockPort)")
     }
 
     func stop() async {
@@ -167,11 +183,14 @@ final class ProxyService {
     private func detach() {
         virtioDevice?.removeSocketListener(forPort: Self.proxyVsockPort)
         virtioDevice?.removeSocketListener(forPort: Self.caVsockPort)
+        virtioDevice?.removeSocketListener(forPort: Self.rawTCPVsockPort)
         virtioDevice?.removeSocketListener(forPort: Self.timeVsockPort)
         virtioDevice?.removeSocketListener(forPort: Self.gitVsockPort)
         virtioDevice = nil
         proxyListener = nil
         proxyListenerDelegate = nil
+        rawTCPListener = nil
+        rawTCPListenerDelegate = nil
         gitListener = nil
         gitListenerDelegate = nil
         caListener = nil
@@ -194,6 +213,7 @@ final class ProxyService {
     private func waitForReady() async throws {
         for _ in 0..<100 {
             if FileManager.default.fileExists(atPath: proxySocketURL.path),
+               FileManager.default.fileExists(atPath: rawTCPSocketURL.path),
                FileManager.default.fileExists(atPath: gitSocketURL.path),
                let data = try? Data(contentsOf: caCertificateURL),
                !data.isEmpty {
@@ -204,7 +224,7 @@ final class ProxyService {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
 
-        throw ProxyServiceError.proxyNotReady("missing \(proxySocketURL.path), \(gitSocketURL.path), or \(caCertificateURL.path)")
+        throw ProxyServiceError.proxyNotReady("missing \(proxySocketURL.path), \(rawTCPSocketURL.path), \(gitSocketURL.path), or \(caCertificateURL.path)")
     }
 
     private static func locateProxyExecutable() throws -> URL {
