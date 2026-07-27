@@ -23,6 +23,7 @@ struct VZMMenuBarApp: App {
         }
     }
 
+    @State private var approvalModeCoordinator = ApprovalModeCoordinator.shared
     @State private var portExposureCoordinator = PortExposureCoordinator.shared
 
     var body: some Scene {
@@ -30,7 +31,7 @@ struct VZMMenuBarApp: App {
             VStack {
                 Text("VM Running...")
                 Divider()
-                ApprovalModeMenuView()
+                ApprovalModeMenuView(coordinator: approvalModeCoordinator)
                 Divider()
                 PortExposureMenuView(coordinator: portExposureCoordinator)
             }
@@ -101,11 +102,77 @@ struct ApprovalCoordinatorRequest: Codable, Sendable {
 
 typealias ApprovalCoordinatorResult = ApprovalPromptActionType
 
+@Observable
+@MainActor
+class ApprovalModeCoordinator {
+    static let shared = ApprovalModeCoordinator()
+
+    private(set) var deadline: Date?
+    private var expirationTask: Task<Void, Never>?
+
+    private init() {}
+
+    func activate(for duration: TemporaryApprovalDuration) {
+        let engine = ManualTemporaryApprovalEngine.shared
+        engine.activate(for: duration)
+
+        guard let newDeadline = engine.currentDeadline() else {
+            return
+        }
+
+        deadline = newDeadline
+        expirationTask?.cancel()
+        expirationTask = Task { [weak self] in
+            let delay = max(0, newDeadline.timeIntervalSinceNow)
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, self?.deadline == newDeadline else {
+                return
+            }
+            self?.deadline = nil
+        }
+    }
+
+    func deactivate() {
+        expirationTask?.cancel()
+        expirationTask = nil
+        ManualTemporaryApprovalEngine.shared.deactivate()
+        deadline = nil
+    }
+}
+
 struct ApprovalModeMenuView: View {
+    @Bindable var coordinator: ApprovalModeCoordinator
+
     var body: some View {
         Section("Approvals") {
-            Button("Approve everything for 5 min") {
-                ManualTemporaryApprovalEngine.shared.activateForFiveMinutes()
+            Menu {
+                if let deadline = coordinator.deadline {
+                    Text("Active until \(deadline.formatted(date: .omitted, time: .shortened))")
+                        .foregroundStyle(.secondary)
+
+                    Button("Turn off", role: .destructive) {
+                        coordinator.deactivate()
+                    }
+
+                    Divider()
+                } else {
+                    Text("No temporary approval active")
+                        .foregroundStyle(.secondary)
+
+                    Divider()
+                }
+
+                ForEach(TemporaryApprovalDuration.allCases) { duration in
+                    Button(duration.label) {
+                        coordinator.activate(for: duration)
+                    }
+                }
+            } label: {
+                if let deadline = coordinator.deadline {
+                    Text("Approve Everything · until \(deadline.formatted(date: .omitted, time: .shortened))")
+                } else {
+                    Text("Approve Everything")
+                }
             }
         }
         .frame(minWidth: 280, alignment: .leading)
