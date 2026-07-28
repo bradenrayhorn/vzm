@@ -30,7 +30,7 @@ actor ApprovalService {
     }
 
     private static let neverSeenDomainWarning = "Warning: new domain."
-    private static let rawTCPWarning = "Warning: raw TCP payloads cannot be inspected; every connection requires approval and credentials and database operations are not approved individually."
+    private static let rawTCPWarning = "Warning: raw TCP payload."
 
     private static func logDecision(_ approved: Bool, request: ProxyApprovalRequest, reason: String) {
         let decision = approved ? "approved" : "denied"
@@ -41,6 +41,7 @@ actor ApprovalService {
     private let recognizedElementStore: RecognizedElementStore
     private let denyEngines: [any ApprovalEngine]
     private let engines: [any ApprovalEngine]
+    private let rawTCPApprovalEngine: RawTCPApprovalEngine
     private var approvalInProgress = false
     private var approvalWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -55,6 +56,7 @@ actor ApprovalService {
             DenyTrackingApprovalEngine(),
             DenyJetBrainsOptionalServicesApprovalEngine(),
         ]
+        self.rawTCPApprovalEngine = RawTCPApprovalEngine()
         self.engines = engines ?? [
             ManualTemporaryApprovalEngine.shared,
             ChatGPTApprovalEngine(),
@@ -134,20 +136,36 @@ actor ApprovalService {
 
         request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: knownUserAgents)
 
-        // Raw TCP payloads cannot be inspected, so every connection must be
-        // explicitly approved by the user. Do not allow an approval engine to
-        // auto-approve it.
+        // Raw TCP payloads cannot be inspected, so only the dedicated bounded
+        // raw TCP engine may auto-approve an already-approved destination.
+        // Normal approval engines must never approve raw TCP traffic.
         if isRawTCP {
-            return .needsUserApproval(
-                PendingApproval(
-                    request: request,
-                    selectedEngine: nil,
-                    warnings: warnings,
-                    knownDomain: false,
-                    userAgents: userAgents,
-                    knownUserAgents: knownUserAgents
+            switch rawTCPApprovalEngine.handle(request) {
+            case .approved:
+                return .approved(request: request, reason: "engine \(rawTCPApprovalEngine.name)")
+            case let .userApprovalRequired(prompt):
+                return .needsUserApproval(
+                    PendingApproval(
+                        request: request,
+                        selectedEngine: SelectedEngine(engine: rawTCPApprovalEngine, prompt: prompt),
+                        warnings: warnings,
+                        knownDomain: false,
+                        userAgents: userAgents,
+                        knownUserAgents: knownUserAgents
+                    )
                 )
-            )
+            case .denied, .unknown:
+                return .needsUserApproval(
+                    PendingApproval(
+                        request: request,
+                        selectedEngine: nil,
+                        warnings: warnings,
+                        knownDomain: false,
+                        userAgents: userAgents,
+                        knownUserAgents: knownUserAgents
+                    )
+                )
+            }
         }
 
         var selectedEngine: SelectedEngine?
