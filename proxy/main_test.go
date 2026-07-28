@@ -42,6 +42,40 @@ func TestIsAllowedDestinationAddr(t *testing.T) {
 	}
 }
 
+func TestIsAllowedRawTCPDestinationAddr(t *testing.T) {
+	tests := []struct {
+		name    string
+		addr    string
+		allowed bool
+	}{
+		{name: "public ipv4", addr: "8.8.8.8", allowed: true},
+		{name: "private 10", addr: "10.20.30.40", allowed: true},
+		{name: "private 172", addr: "172.20.30.40", allowed: true},
+		{name: "private 192", addr: "192.168.1.20", allowed: true},
+		{name: "carrier grade NAT", addr: "100.64.1.20", allowed: true},
+		{name: "ipv6 unique local", addr: "fd00::20", allowed: true},
+		{name: "mapped private ipv4", addr: "::ffff:10.20.30.40", allowed: true},
+		{name: "loopback ipv4", addr: "127.0.0.1", allowed: false},
+		{name: "loopback ipv6", addr: "::1", allowed: false},
+		{name: "link local ipv4", addr: "169.254.1.20", allowed: false},
+		{name: "link local ipv6", addr: "fe80::20", allowed: false},
+		{name: "documentation ipv4", addr: "192.0.2.20", allowed: false},
+		{name: "documentation ipv6", addr: "2001:db8::20", allowed: false},
+		{name: "multicast ipv4", addr: "224.0.0.1", allowed: false},
+		{name: "unspecified ipv4", addr: "0.0.0.0", allowed: false},
+		{name: "scoped private ipv6", addr: "fd00::20%lo0", allowed: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr := netip.MustParseAddr(tt.addr)
+			if got := isAllowedRawTCPDestinationAddr(addr); got != tt.allowed {
+				t.Fatalf("isAllowedRawTCPDestinationAddr(%s) = %v, want %v", tt.addr, got, tt.allowed)
+			}
+		})
+	}
+}
+
 func TestBlockedDestinationPrefixesAreRejected(t *testing.T) {
 	for _, prefix := range blockedDestinationPrefixes {
 		t.Run(prefix.String(), func(t *testing.T) {
@@ -79,6 +113,37 @@ func TestRejectBlockedDialDestination(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("rejectBlockedDialDestination() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestRejectUnsafeRawTCPDialDestination(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		blocked bool
+	}{
+		{name: "public", address: "8.8.8.8:5432"},
+		{name: "private", address: "10.20.30.40:5432"},
+		{name: "carrier grade NAT", address: "100.64.1.20:5432"},
+		{name: "unique local", address: "[fd00::20]:5432"},
+		{name: "loopback", address: "127.0.0.1:5432", blocked: true},
+		{name: "link local", address: "169.254.1.20:5432", blocked: true},
+		{name: "reserved", address: "192.0.2.20:5432", blocked: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := rejectUnsafeRawTCPDialDestination(context.Background(), "tcp", tt.address, nil)
+			if tt.blocked {
+				if !errors.Is(err, errBlockedDestination) {
+					t.Fatalf("rejectUnsafeRawTCPDialDestination() error = %v, want %v", err, errBlockedDestination)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("rejectUnsafeRawTCPDialDestination() unexpected error: %v", err)
 			}
 		})
 	}

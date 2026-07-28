@@ -34,6 +34,10 @@ var (
 		Timeout:        15 * time.Second,
 		ControlContext: rejectBlockedDialDestination,
 	}
+	rawTCPDialer = &net.Dialer{
+		Timeout:        15 * time.Second,
+		ControlContext: rejectUnsafeRawTCPDialDestination,
+	}
 	outboundClient = &http.Client{
 		Transport: newOutboundTransport(),
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -43,7 +47,7 @@ var (
 	controlUnixPath      string
 	approvalRequestID    uint64
 	rawTCPAskForApproval = askForApproval
-	rawTCPDialContext    = dialPublicTCPContext
+	rawTCPDialContext    = dialRawTCPContext
 )
 
 var errBlockedDestination = errors.New("blocked destination")
@@ -79,7 +83,10 @@ var (
 	shutdownCtx   = context.Background()
 )
 
-var publicIPv6GlobalUnicastPrefix = mustPrefix("2000::/3")
+var (
+	publicIPv6GlobalUnicastPrefix = mustPrefix("2000::/3")
+	carrierGradeNATPrefix         = mustPrefix("100.64.0.0/10")
+)
 
 // IANA special-purpose and non-public destination ranges. IPv4-mapped IPv6
 // addresses are handled by Unmap so the embedded IPv4 address follows IPv4 policy.
@@ -637,7 +644,19 @@ func dialPublicTCPContext(ctx context.Context, network, address string) (net.Con
 	return publicDialer.DialContext(ctx, network, address)
 }
 
+func dialRawTCPContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return rawTCPDialer.DialContext(ctx, network, address)
+}
+
 func rejectBlockedDialDestination(_ context.Context, network, address string, _ syscall.RawConn) error {
+	return rejectDialDestination(network, address, isAllowedDestinationAddr)
+}
+
+func rejectUnsafeRawTCPDialDestination(_ context.Context, network, address string, _ syscall.RawConn) error {
+	return rejectDialDestination(network, address, isAllowedRawTCPDestinationAddr)
+}
+
+func rejectDialDestination(network, address string, allowed func(netip.Addr) bool) error {
 	if !strings.HasPrefix(network, "tcp") {
 		return nil
 	}
@@ -647,10 +666,26 @@ func rejectBlockedDialDestination(_ context.Context, network, address string, _ 
 		return fmt.Errorf("%w: invalid resolved address %q", errBlockedDestination, address)
 	}
 	addr := addrPort.Addr()
-	if !isAllowedDestinationAddr(addr) {
+	if !allowed(addr) {
 		return fmt.Errorf("%w: %s", errBlockedDestination, addr)
 	}
 	return nil
+}
+
+// isAllowedRawTCPDestinationAddr permits public destinations plus private-use
+// and carrier-grade NAT addresses commonly reached over a VPN. Host loopback,
+// link-local, multicast, unspecified, documentation, and other reserved ranges
+// remain blocked even after the raw TCP connection is approved.
+func isAllowedRawTCPDestinationAddr(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.Zone() != "" {
+		return false
+	}
+
+	addr = addr.Unmap()
+	if addr.IsPrivate() || carrierGradeNATPrefix.Contains(addr) {
+		return true
+	}
+	return isAllowedDestinationAddr(addr)
 }
 
 func isAllowedDestinationAddr(addr netip.Addr) bool {
