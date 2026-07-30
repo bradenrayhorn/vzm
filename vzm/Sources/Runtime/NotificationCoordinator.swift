@@ -23,6 +23,7 @@ final class NotificationCoordinator {
     private(set) var notifications: [GuestNotification] = []
 
     private let maximumPendingNotifications = 64
+    private let notificationSound = NSSound(named: NSSound.Name("Submerge"))
     private var panel: NSPanel?
     private var screenParametersObserver: NSObjectProtocol?
 
@@ -56,6 +57,7 @@ final class NotificationCoordinator {
         }
 
         notifications.append(GuestNotification(from: from, message: message))
+        notificationSound?.play()
         showPanel()
         return notifications.count
     }
