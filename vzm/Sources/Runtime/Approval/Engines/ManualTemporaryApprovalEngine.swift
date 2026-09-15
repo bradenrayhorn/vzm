@@ -6,6 +6,7 @@ enum TemporaryApprovalDuration: CaseIterable, Identifiable {
     case tenMinutes
     case thirtyMinutes
     case oneHour
+    case eightHours
 
     var id: Self { self }
 
@@ -16,6 +17,7 @@ enum TemporaryApprovalDuration: CaseIterable, Identifiable {
         case .tenMinutes: 10 * 60
         case .thirtyMinutes: 30 * 60
         case .oneHour: 60 * 60
+        case .eightHours: 8 * 60 * 60
         }
     }
 
@@ -26,6 +28,7 @@ enum TemporaryApprovalDuration: CaseIterable, Identifiable {
         case .tenMinutes: "10 minutes"
         case .thirtyMinutes: "30 minutes"
         case .oneHour: "1 hour"
+        case .eightHours: "8 hours"
         }
     }
 }
