@@ -3,28 +3,43 @@ import Foundation
 final class ChatGPTApprovalEngine: BaseApprovalEngine {
     override var name: String { "ChatGPT" }
 
-    private var isActivated = false
+    private var approvedAccountIDs: Set<String> = []
 
     private static let urlRegex = try! NSRegularExpression(
         pattern: #"^chatgpt\.com/backend-api/codex/responses$"#
     )
 
+    override func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
+        guard matches(request), let accountID = accountID(for: request) else {
+            return false
+        }
+        return approvedAccountIDs.contains(accountID)
+    }
+
+    override func onEngineApproved(_ request: ProxyApprovalRequest) {
+        guard matches(request), let accountID = accountID(for: request) else { return }
+        approvedAccountIDs.insert(accountID)
+    }
+
+    private func matches(_ request: ProxyApprovalRequest) -> Bool {
+        request.type == "WEBSOCKET"
+            && request.method == "GET"
+            && request.body == nil
+            && request.secrets.isEmpty
+            && urlMatches(regexes: [Self.urlRegex], request.url)
+    }
+
+    private func accountID(for request: ProxyApprovalRequest) -> String? {
+        let headers = request.headers.filter {
+            $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "chatgpt-account-id"
+        }
+        guard headers.count == 1 else { return nil }
+        let value = headers[0].value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
     override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard request.type == "WEBSOCKET" else {
-            return .unknown
-        }
-        guard request.method == "GET" else {
-            return .unknown
-        }
-        guard request.body == nil else {
-            return .unknown
-        }
-        guard request.secrets.isEmpty else {
-            return .unknown
-        }
-        guard urlMatches(regexes: [Self.urlRegex], request.url) else {
-            return .unknown
-        }
+        guard matches(request) else { return .unknown }
 
         return .userApprovalRequired(
             .presentation(

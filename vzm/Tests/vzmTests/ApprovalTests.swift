@@ -75,6 +75,12 @@ final class ApprovalTests: XCTestCase {
         )
     }
 
+    private func chatGPTRequest(accountID: String = "91691066-ac6c-4de7-b6cc-6e53b2ff7b34") -> ProxyApprovalRequest {
+        var r = request("chatgpt.com/backend-api/codex/responses", type: "WEBSOCKET")
+        r.headers = [ProxyApprovalHeader(name: "Chatgpt-Account-Id", value: accountID)]
+        return r
+    }
+
     private func service(engines: [any ApprovalEngine]? = nil, denyEngines: [any ApprovalEngine]? = nil) throws -> ApprovalService {
         let prompts = self.prompts!
         return try ApprovalService(
@@ -250,6 +256,108 @@ final class ApprovalTests: XCTestCase {
         await assertDecision(service, secretRequest, false)
         let presentations = await prompts.presentations
         XCTAssertEqual(presentations.count, requests.count + 1)
+    }
+
+    func testChatGPTManualSessionApprovalRemembersAccountForEngineLifetime() async throws {
+        mode.select(.auto)
+        let service = try service()
+        var r = chatGPTRequest()
+        r.headers.append(ProxyApprovalHeader(name: "Authorization", value: "Bearer first-token"))
+        await assertDecision(service, r, false)
+
+        await prompts.setAction(.approveEngine)
+        await assertDecision(service, r, true)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, 2)
+        XCTAssertEqual(presentations.last?.title, "ChatGPT session")
+
+        await prompts.setAction(.deny)
+        r.headers[0] = ProxyApprovalHeader(name: "cHaTgPt-AcCoUnT-iD", value: " \(r.headers[0].value) ")
+        r.headers[1] = ProxyApprovalHeader(name: "Authorization", value: "Bearer rotated-token")
+        await assertDecision(service, r, true)
+        let presentationsAfterAuto = await prompts.presentations
+        XCTAssertEqual(presentationsAfterAuto.count, 2)
+
+        await assertDecision(service, chatGPTRequest(accountID: "another-account"), false)
+        mode.select(.default)
+        await assertDecision(service, r, false)
+        mode.select(.approveEverything(until: Date().addingTimeInterval(60)))
+        await assertDecision(service, r, false)
+
+        // A fresh service/engine does not retain account trust.
+        mode.select(.auto)
+        let restartedService = try self.service()
+        await assertDecision(restartedService, r, false)
+        await assertDecision(service, r, true)
+    }
+
+    func testChatGPTDenyAndApproveOnceDoNotRememberAccount() async throws {
+        mode.select(.auto)
+        let service = try service()
+        let r = chatGPTRequest()
+        await assertDecision(service, r, false)
+        await prompts.setAction(.approveOnce)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+        await assertDecision(service, r, false)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, 3)
+    }
+
+    func testChatGPTMissingEmptyAndDuplicateAccountHeadersDoNotEstablishTrust() async throws {
+        mode.select(.auto)
+        let engine = ChatGPTApprovalEngine()
+        let service = try service(engines: [engine])
+        var missing = chatGPTRequest()
+        missing.headers = []
+        var duplicate = chatGPTRequest()
+        duplicate.headers.append(ProxyApprovalHeader(name: "chatgpt-account-id", value: duplicate.headers[0].value))
+        var conflicting = chatGPTRequest()
+        conflicting.headers.append(ProxyApprovalHeader(name: "chatgpt-account-id", value: "another-account"))
+        let requests = [missing, chatGPTRequest(accountID: " \n\t"), duplicate, conflicting]
+
+        await prompts.setAction(.approveEngine)
+        for r in requests { await assertDecision(service, r, true) }
+        XCTAssertFalse(engine.isEligibleForAuto(chatGPTRequest()))
+        XCTAssertFalse(engine.isEligibleForAuto(chatGPTRequest(accountID: "another-account")))
+
+        // Even with a known account, ambiguous/missing headers must still prompt.
+        engine.onEngineApproved(chatGPTRequest())
+        await prompts.setAction(.deny)
+        for r in requests { await assertDecision(service, r, false) }
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, requests.count * 2)
+    }
+
+    func testChatGPTKnownAccountDoesNotBypassSessionRestrictions() {
+        let r = chatGPTRequest()
+        let engine = ChatGPTApprovalEngine()
+        engine.onEngineApproved(r)
+        XCTAssertTrue(engine.isEligibleForAuto(r))
+        var invalidRequests: [ProxyApprovalRequest] = []
+        for type in ["REQUEST", "CONNECT", "TCP_CONNECT", "GIT"] {
+            var invalid = r
+            invalid.type = type
+            invalidRequests.append(invalid)
+        }
+        var invalid = r
+        invalid.method = "POST"
+        invalidRequests.append(invalid)
+        invalid = r
+        invalid.body = ProxyApprovalBody(text: "payload", warning: "")
+        invalidRequests.append(invalid)
+        invalid = r
+        invalid.secrets = ["TOKEN"]
+        invalidRequests.append(invalid)
+        for url in ["example.com/backend-api/codex/responses", "chatgpt.com/other", "chatgpt.com/backend-api/codex/responses?extra=1"] {
+            invalid = r
+            invalid.url = url
+            invalidRequests.append(invalid)
+        }
+        for invalid in invalidRequests {
+            XCTAssertFalse(engine.isEligibleForAuto(invalid))
+            if case .unknown = engine.handle(invalid) {} else { XCTFail("Invalid session matched") }
+        }
     }
 
     func testQueuedRequestIsReevaluatedAfterModeChange() async throws {
