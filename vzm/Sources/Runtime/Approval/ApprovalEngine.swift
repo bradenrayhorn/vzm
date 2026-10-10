@@ -3,8 +3,14 @@ import Foundation
 protocol ApprovalEngine {
     var name: String { get }
 
+    /// Side-effect-free eligibility; excludes session gates and never grants consent.
+    func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool
     func handle(_ request: ProxyApprovalRequest) -> EngineResult
     func onEngineApproved(_ request: ProxyApprovalRequest)
+}
+
+extension ApprovalEngine {
+    func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool { false }
 }
 
 struct ApprovalPromptSection: Codable, Sendable {
@@ -70,6 +76,10 @@ open class BaseApprovalEngine: ApprovalEngine {
 
     open func checkGates() -> Bool {
         gates.allSatisfy { $0.canContinue() }
+    }
+
+    func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
+        false
     }
 
     func handle(_ request: ProxyApprovalRequest) -> EngineResult {

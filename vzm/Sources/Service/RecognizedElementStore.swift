@@ -11,12 +11,16 @@ final class RecognizedElementStore {
     private let fileManager: FileManager
     private let directoryURL: URL
 
-    init(fileManager: FileManager = .default) throws {
+    init(fileManager: FileManager = .default, directoryURL: URL? = nil) throws {
         self.fileManager = fileManager
 
-        let paths = try StorePaths(fileManager: fileManager)
-        self.directoryURL = paths.vzmDirectoryURL
-            .appendingPathComponent("recognized-elements", isDirectory: true)
+        if let directoryURL {
+            self.directoryURL = directoryURL
+        } else {
+            let paths = try StorePaths(fileManager: fileManager)
+            self.directoryURL = paths.vzmDirectoryURL
+                .appendingPathComponent("recognized-elements", isDirectory: true)
+        }
 
         try createDirectory()
     }

@@ -1,10 +1,8 @@
 import Foundation
 
 /// Approves the read-only Docker Hub image-pull protocol after the user approves it once.
-final class DockerHubApprovalEngine: BaseApprovalEngine {
+final class DockerHubApprovalEngine: PatternApprovalEngine {
     override var name: String { "DockerHub" }
-
-    private var approvedHeaders: Set<ProxyApprovalHeader>?
 
     private static let registryPathRegex = try! NSRegularExpression(
         pattern: #"^/v2/(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)+(?:manifests/(?:sha256:[0-9a-f]{64}|[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})|(?:blobs|referrers)/sha256:[0-9a-f]{64})$"#
@@ -21,28 +19,12 @@ final class DockerHubApprovalEngine: BaseApprovalEngine {
         ])
     }
 
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard request.type == "REQUEST",
-              request.secrets.isEmpty,
-              request.body == nil,
-              request.method == "GET" || request.method == "HEAD",
-              isDockerHubPullURL(request.url)
-        else {
-            return .unknown
-        }
-
-        if let approvedHeaders,
-           approvedHeaders.isSuperset(of: Set(request.headers)),
-           checkGates() {
-            return .approved
-        }
-
-        return .userApprovalRequired(.default)
-    }
-
-    override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
-        super.onEngineApproved(request)
+    override func matches(_ request: ProxyApprovalRequest) -> Bool {
+        request.type == "REQUEST"
+            && request.secrets.isEmpty
+            && request.body == nil
+            && (request.method == "GET" || request.method == "HEAD")
+            && isDockerHubPullURL(request.url)
     }
 
     private func isDockerHubPullURL(_ url: String) -> Bool {

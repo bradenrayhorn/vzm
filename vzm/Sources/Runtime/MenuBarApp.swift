@@ -107,36 +107,31 @@ typealias ApprovalCoordinatorResult = ApprovalPromptActionType
 class ApprovalModeCoordinator {
     static let shared = ApprovalModeCoordinator()
 
-    private(set) var deadline: Date?
+    private(set) var mode: ApprovalMode = .default
     private var expirationTask: Task<Void, Never>?
+    private let modeState = ApprovalModeState.shared
 
     private init() {}
 
-    func activate(for duration: TemporaryApprovalDuration) {
-        let engine = ManualTemporaryApprovalEngine.shared
-        engine.activate(for: duration)
-
-        guard let newDeadline = engine.currentDeadline() else {
-            return
-        }
-
-        deadline = newDeadline
+    func select(_ mode: ApprovalMode) {
         expirationTask?.cancel()
+        expirationTask = nil
+        modeState.select(mode)
+        self.mode = modeState.current()
+
+        guard case let .approveEverything(deadline) = self.mode else { return }
         expirationTask = Task { [weak self] in
-            let delay = max(0, newDeadline.timeIntervalSinceNow)
+            let delay = max(0, deadline.timeIntervalSinceNow)
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, self?.deadline == newDeadline else {
+            guard !Task.isCancelled, self?.mode == .approveEverything(until: deadline) else {
                 return
             }
-            self?.deadline = nil
+            self?.select(.default)
         }
     }
 
-    func deactivate() {
-        expirationTask?.cancel()
-        expirationTask = nil
-        ManualTemporaryApprovalEngine.shared.deactivate()
-        deadline = nil
+    func activate(for duration: TemporaryApprovalDuration) {
+        select(.approveEverything(until: Date().addingTimeInterval(duration.seconds)))
     }
 }
 
@@ -145,30 +140,25 @@ struct ApprovalModeMenuView: View {
 
     var body: some View {
         Section("Approvals") {
+            Button {
+                coordinator.select(.default)
+            } label: {
+                Label("Default", systemImage: coordinator.mode == .default ? "checkmark.circle.fill" : "circle")
+            }
+            Button {
+                coordinator.select(.auto)
+            } label: {
+                Label("Auto", systemImage: coordinator.mode == .auto ? "checkmark.circle.fill" : "circle")
+            }
+
             Menu {
-                if let deadline = coordinator.deadline {
-                    Text("Active until \(deadline.formatted(date: .omitted, time: .shortened))")
-                        .foregroundStyle(.secondary)
-
-                    Button("Turn off", role: .destructive) {
-                        coordinator.deactivate()
-                    }
-
-                    Divider()
-                } else {
-                    Text("No temporary approval active")
-                        .foregroundStyle(.secondary)
-
-                    Divider()
-                }
-
                 ForEach(TemporaryApprovalDuration.allCases) { duration in
                     Button(duration.label) {
                         coordinator.activate(for: duration)
                     }
                 }
             } label: {
-                if let deadline = coordinator.deadline {
+                if case let .approveEverything(deadline) = coordinator.mode {
                     Text("Approve Everything · until \(deadline.formatted(date: .omitted, time: .shortened))")
                 } else {
                     Text("Approve Everything")

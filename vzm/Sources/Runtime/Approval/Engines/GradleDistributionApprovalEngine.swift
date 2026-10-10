@@ -1,9 +1,7 @@
 import Foundation
 
-final class GradleDistributionApprovalEngine: BaseApprovalEngine {
+final class GradleDistributionApprovalEngine: PatternApprovalEngine {
     override var name: String { "GradleDistribution" }
-
-    private var approvedHeaders: Set<ProxyApprovalHeader>?
 
     private static let urlRegexes: [NSRegularExpression] = [
         try! NSRegularExpression(
@@ -22,32 +20,11 @@ final class GradleDistributionApprovalEngine: BaseApprovalEngine {
         ])
     }
 
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard request.type == "REQUEST" else {
-            return .unknown
-        }
-        guard request.secrets.isEmpty else {
-            return .unknown
-        }
-        guard request.body == nil else {
-            return .unknown
-        }
-        guard request.method == "GET" else {
-            return .unknown
-        }
-        guard urlMatches(regexes: Self.urlRegexes, request.url) else {
-            return .unknown
-        }
-
-        if let approvedHeaders, approvedHeaders.isSuperset(of: Set(request.headers)), checkGates() {
-            return .approved
-        }
-
-        return .userApprovalRequired(.default)
-    }
-
-    override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
-        super.onEngineApproved(request)
+    override func matches(_ request: ProxyApprovalRequest) -> Bool {
+        request.type == "REQUEST"
+            && request.secrets.isEmpty
+            && request.body == nil
+            && request.method == "GET"
+            && urlMatches(regexes: Self.urlRegexes, request.url)
     }
 }

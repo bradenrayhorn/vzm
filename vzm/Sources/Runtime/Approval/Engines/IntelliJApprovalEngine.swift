@@ -2,10 +2,8 @@ import Foundation
 
 /// Approves read-only JetBrains IDE metadata and download requests for a short IDE session.
 /// Account, AI, and arbitrary JetBrains web requests intentionally do not match.
-final class IntelliJApprovalEngine: BaseApprovalEngine {
+final class IntelliJApprovalEngine: PatternApprovalEngine {
     override var name: String { "IntelliJ" }
-
-    private var approvedHeaders: Set<ProxyApprovalHeader>?
 
     init() {
         super.init(gateBuilders: [
@@ -14,30 +12,12 @@ final class IntelliJApprovalEngine: BaseApprovalEngine {
         ])
     }
 
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard request.type == "REQUEST" else {
-            return .unknown
-        }
-        guard request.method == "GET" || request.method == "HEAD" else {
-            return .unknown
-        }
-        guard request.secrets.isEmpty, request.body == nil else {
-            return .unknown
-        }
-        guard Self.isAllowedURL(request.url) else {
-            return .unknown
-        }
-
-        if let approvedHeaders, approvedHeaders.isSuperset(of: Set(request.headers)), checkGates() {
-            return .approved
-        }
-
-        return .userApprovalRequired(.default)
-    }
-
-    override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
-        super.onEngineApproved(request)
+    override func matches(_ request: ProxyApprovalRequest) -> Bool {
+        request.type == "REQUEST"
+            && (request.method == "GET" || request.method == "HEAD")
+            && request.secrets.isEmpty
+            && request.body == nil
+            && Self.isAllowedURL(request.url)
     }
 
     private static func isAllowedURL(_ url: String) -> Bool {

@@ -1,9 +1,7 @@
 import Foundation
 
-final class MavenRepositoryApprovalEngine: BaseApprovalEngine {
+final class MavenRepositoryApprovalEngine: PatternApprovalEngine {
     override var name: String { "MavenRepository" }
-
-    private var approvedHeaders: Set<ProxyApprovalHeader>?
 
     private static let allowedHosts: Set<String> = [
         "plugins.gradle.org",
@@ -23,33 +21,12 @@ final class MavenRepositoryApprovalEngine: BaseApprovalEngine {
         ])
     }
 
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard request.type == "REQUEST" else {
-            return .unknown
-        }
-        guard request.secrets.isEmpty else {
-            return .unknown
-        }
-        guard request.body == nil else {
-            return .unknown
-        }
-        guard request.method == "GET" || request.method == "HEAD" else {
-            return .unknown
-        }
-        guard isAllowedRepositoryURL(request.url) else {
-            return .unknown
-        }
-
-        if let approvedHeaders, approvedHeaders.isSuperset(of: Set(request.headers)), self.checkGates() {
-            return .approved
-        }
-
-        return .userApprovalRequired(.default)
-    }
-
-    override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
-        super.onEngineApproved(request)
+    override func matches(_ request: ProxyApprovalRequest) -> Bool {
+        request.type == "REQUEST"
+            && request.secrets.isEmpty
+            && request.body == nil
+            && (request.method == "GET" || request.method == "HEAD")
+            && isAllowedRepositoryURL(request.url)
     }
 
     private func isAllowedRepositoryURL(_ url: String) -> Bool {

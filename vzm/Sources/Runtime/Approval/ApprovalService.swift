@@ -42,23 +42,31 @@ actor ApprovalService {
     private let denyEngines: [any ApprovalEngine]
     private let engines: [any ApprovalEngine]
     private let rawTCPApprovalEngine: RawTCPApprovalEngine
+    private let modeState: ApprovalModeState
+    private let promptUser: (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult
     private var approvalInProgress = false
     private var approvalWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         fileManager: FileManager = .default,
         denyEngines: [any ApprovalEngine]? = nil,
-        engines: [any ApprovalEngine]? = nil
+        engines: [any ApprovalEngine]? = nil,
+        recognizedElementStore: RecognizedElementStore? = nil,
+        modeState: ApprovalModeState = .shared,
+        promptUser: @escaping (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult = {
+            await ApprovalCoordinator.shared.askForApproval(request: $0)
+        }
     ) throws {
-        let recognizedElementStore = try RecognizedElementStore(fileManager: fileManager)
+        let recognizedElementStore = try recognizedElementStore ?? RecognizedElementStore(fileManager: fileManager)
         self.recognizedElementStore = recognizedElementStore
+        self.modeState = modeState
+        self.promptUser = promptUser
         self.denyEngines = denyEngines ?? [
             DenyTrackingApprovalEngine(),
             DenyJetBrainsOptionalServicesApprovalEngine(),
         ]
         self.rawTCPApprovalEngine = RawTCPApprovalEngine()
         self.engines = engines ?? [
-            ManualTemporaryApprovalEngine.shared,
             ChatGPTApprovalEngine(),
             IntelliJApprovalEngine(),
             GradleDistributionApprovalEngine(),
@@ -169,12 +177,31 @@ actor ApprovalService {
             }
         }
 
+        // A new CONNECT domain always requires explicit consent, in every mode.
+        // Neither general approval modes nor pattern engines may establish it.
+        if request.type == "CONNECT" {
+            return .needsUserApproval(
+                PendingApproval(
+                    request: request,
+                    selectedEngine: nil,
+                    warnings: warnings,
+                    knownDomain: knownDomain,
+                    userAgents: userAgents,
+                    knownUserAgents: knownUserAgents
+                )
+            )
+        }
+
+        let mode = modeState.current()
+        if case .approveEverything = mode,
+           !isGit, request.type != "WEBSOCKET", request.secrets.isEmpty {
+            return .approved(request: request, reason: "mode Approve Everything")
+        }
+
         var selectedEngine: SelectedEngine?
         for engine in engines {
-            // Git requests must always receive an explicit approval; the
-            // temporary "Approve Everything" mode must not bypass the prompt.
-            if isGit && engine is ManualTemporaryApprovalEngine {
-                continue
+            if mode == .auto && engine.isEligibleForAuto(request) {
+                return .approved(request: request, reason: "mode Auto, engine \(engine.name)")
             }
 
             switch engine.handle(request) {
@@ -205,10 +232,8 @@ actor ApprovalService {
 
     private func askUserForApproval(_ pendingApproval: PendingApproval) async -> Bool {
         var request = pendingApproval.request
-        let action = await ApprovalCoordinator.shared.askForApproval(
-            request: ApprovalCoordinatorRequest(
-                presentation: buildPromptPresentation(for: pendingApproval)
-            )
+        let action = await promptUser(
+            ApprovalCoordinatorRequest(presentation: buildPromptPresentation(for: pendingApproval))
         )
 
         if action.isApproved && pendingApproval.userAgents.count > pendingApproval.knownUserAgents.count {
