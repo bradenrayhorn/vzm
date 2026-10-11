@@ -121,7 +121,7 @@ struct Run: AsyncParsableCommand {
 struct Secret: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage secrets stored in the macOS Keychain.",
-        subcommands: [SecretAdd.self, SecretList.self, SecretRemove.self],
+        subcommands: [SecretAdd.self, SecretList.self, SecretRemove.self, SecretHost.self],
         defaultSubcommand: SecretList.self
     )
 }
@@ -184,6 +184,38 @@ struct SecretRemove: ParsableCommand {
         let secretStore = SecretStore()
         try secretStore.removeSecret(named: name)
         print("Removed secret '\(name)'")
+    }
+}
+
+struct SecretHost: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "host",
+        abstract: "Manage allowed hosts for an existing secret.",
+        subcommands: [SecretHostAdd.self, SecretHostRemove.self]
+    )
+}
+
+struct SecretHostAdd: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "add")
+
+    @Argument var name: String
+    @Argument(help: "Host/domain to allow (exact match).") var domain: String
+
+    mutating func run() throws {
+        try SecretStore().addHost(domain, toSecretNamed: name)
+        print("Added host '\(domain)' to secret '\(name)'")
+    }
+}
+
+struct SecretHostRemove: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "rm")
+
+    @Argument var name: String
+    @Argument(help: "Host/domain to remove. The last allowed host cannot be removed.") var domain: String
+
+    mutating func run() throws {
+        try SecretStore().removeHost(domain, fromSecretNamed: name)
+        print("Removed host '\(domain)' from secret '\(name)'")
     }
 }
 

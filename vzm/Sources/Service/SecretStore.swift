@@ -11,6 +11,7 @@ final class SecretStore {
         case invalidName
         case invalidHost(String)
         case secretNotFound(String)
+        case cannotRemoveLastHost(String)
         case keychainError(OSStatus)
         case invalidMetadata(String)
 
@@ -22,6 +23,8 @@ final class SecretStore {
                 return "Invalid host: \(host)"
             case .secretNotFound(let name):
                 return "Secret does not exist: \(name)"
+            case .cannotRemoveLastHost(let name):
+                return "Cannot remove the last allowed host from secret '\(name)': an empty host list allows all hosts."
             case .keychainError(let status):
                 return SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error: \(status)"
             case .invalidMetadata(let name):
@@ -30,9 +33,13 @@ final class SecretStore {
         }
     }
 
-    private let service = "dev.bradenrayhorn.vzm.secret"
+    private let service: String
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+
+    init(service: String = "dev.bradenrayhorn.vzm.secret") {
+        self.service = service
+    }
 
     func upsertSecret(named name: String, secret: String, hosts: [String]) throws {
         let normalizedName = try normalizeName(name)
@@ -145,6 +152,78 @@ final class SecretStore {
             throw Error.secretNotFound(normalizedName)
         default:
             throw Error.keychainError(status)
+        }
+    }
+
+    func addHost(_ host: String, toSecretNamed name: String) throws {
+        let normalizedHost = try normalizeHosts([host])[0]
+        try updateHosts(named: name) { hosts in
+            hosts + [normalizedHost]
+        }
+    }
+
+    func removeHost(_ host: String, fromSecretNamed name: String) throws {
+        let normalizedHost = try normalizeHosts([host])[0]
+        try updateHosts(named: name) { hosts in
+            guard hosts.contains(normalizedHost) else {
+                return hosts
+            }
+            guard hosts.count > 1 else {
+                throw Error.cannotRemoveLastHost(name)
+            }
+            return hosts.filter { $0 != normalizedHost }
+        }
+    }
+
+    private func updateHosts(named name: String, transform: ([String]) throws -> [String]) throws {
+        let normalizedName = try normalizeName(name)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: normalizedName,
+        ]
+        var readQuery = query
+        readQuery[kSecReturnAttributes as String] = true
+        readQuery[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: CFTypeRef?
+        let readStatus = SecItemCopyMatching(readQuery as CFDictionary, &result)
+        switch readStatus {
+        case errSecSuccess:
+            break
+        case errSecItemNotFound:
+            throw Error.secretNotFound(normalizedName)
+        default:
+            throw Error.keychainError(readStatus)
+        }
+
+        guard
+            let attributes = result as? [String: Any],
+            let metadataData = attributes[kSecAttrGeneric as String] as? Data,
+            let metadata = try? decoder.decode(StoredSecret.self, from: metadataData),
+            metadata.name == normalizedName
+        else {
+            throw Error.invalidMetadata(normalizedName)
+        }
+
+        let hosts = try normalizeHosts(metadata.hosts)
+        let updatedHosts = try normalizeHosts(transform(hosts))
+        guard updatedHosts != metadata.hosts else {
+            return
+        }
+
+        let updatedMetadata = StoredSecret(name: normalizedName, hosts: updatedHosts)
+        let updateAttributes: [String: Any] = [
+            kSecAttrGeneric as String: try encoder.encode(updatedMetadata),
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        switch updateStatus {
+        case errSecSuccess:
+            return
+        case errSecItemNotFound:
+            throw Error.secretNotFound(normalizedName)
+        default:
+            throw Error.keychainError(updateStatus)
         }
     }
 
