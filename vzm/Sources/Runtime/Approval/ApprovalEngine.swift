@@ -16,6 +16,36 @@ extension ApprovalEngine {
 struct ApprovalPromptSection: Codable, Sendable {
     let title: String
     let text: String
+
+    static func requestDetails(for request: ProxyApprovalRequest) -> [ApprovalPromptSection] {
+        var sections: [ApprovalPromptSection] = [
+            ApprovalPromptSection(title: "Type", text: request.type),
+            ApprovalPromptSection(title: "URL", text: "\(request.method) \(request.url)"),
+        ]
+
+        if !request.domain.isEmpty {
+            sections.append(ApprovalPromptSection(title: "Domain", text: request.domain))
+        }
+
+        if !request.headers.isEmpty {
+            sections.append(
+                ApprovalPromptSection(
+                    title: "Headers",
+                    text: request.headers.map { "\($0.name): \($0.value)" }.joined(separator: "\n")
+                )
+            )
+        }
+
+        if let body = request.body {
+            sections.append(ApprovalPromptSection(title: "Body", text: body.text))
+        }
+
+        if !request.secrets.isEmpty {
+            sections.append(ApprovalPromptSection(title: "Secrets", text: request.secrets.joined(separator: ", ")))
+        }
+
+        return sections
+    }
 }
 
 enum ApprovalPromptActionType: String, Codable, Sendable {

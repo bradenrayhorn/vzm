@@ -19,19 +19,17 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
         ])
     }
 
+    override func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
+        guard repositoryPrefixIfMatchingRequest(request) != nil else { return false }
+
+        // Auto reuses explicit header/secret consent across matching feeds,
+        // without consuming session gates or establishing new consent.
+        return (request.headers.isEmpty || approvedHeaders?.isSuperset(of: Set(request.headers)) == true)
+            && (request.secrets.isEmpty || approvedSecrets?.isSuperset(of: Set(request.secrets)) == true)
+    }
+
     override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard request.type == "REQUEST" else {
-            return .unknown
-        }
-        guard request.body == nil else {
-            return .unknown
-        }
-        guard request.method == "GET" || request.method == "HEAD" else {
-            return .unknown
-        }
-        guard let repositoryPrefix = repositoryPrefixIfAllowedMavenURL(request.url) else {
-            return .unknown
-        }
+        guard let repositoryPrefix = repositoryPrefixIfMatchingRequest(request) else { return .unknown }
 
         if let approvedRepositoryPrefix,
            let approvedHeaders,
@@ -47,10 +45,19 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedRepositoryPrefix = repositoryPrefixIfAllowedMavenURL(request.url)
+        guard let repositoryPrefix = repositoryPrefixIfMatchingRequest(request) else { return }
+        approvedRepositoryPrefix = repositoryPrefix
         approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
         approvedSecrets = (approvedSecrets ?? []).union(Set(request.secrets))
         super.onEngineApproved(request)
+    }
+
+    private func repositoryPrefixIfMatchingRequest(_ request: ProxyApprovalRequest) -> String? {
+        guard request.type == "REQUEST",
+              request.body == nil,
+              request.method == "GET" || request.method == "HEAD"
+        else { return nil }
+        return repositoryPrefixIfAllowedMavenURL(request.url)
     }
 
     private func repositoryPrefixIfAllowedMavenURL(_ url: String) -> String? {

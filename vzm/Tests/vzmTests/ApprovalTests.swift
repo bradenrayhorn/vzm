@@ -81,6 +81,21 @@ final class ApprovalTests: XCTestCase {
         return r
     }
 
+    private func azureMavenRequest(organization: String = "org", feed: String = "feed") -> ProxyApprovalRequest {
+        var r = request("pkgs.dev.azure.com/\(organization)/_packaging/\(feed)/maven/v1/org/example/lib/1.0/lib-1.0.jar")
+        r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer {vzm:PAT}")]
+        r.secrets = ["PAT"]
+        return r
+    }
+
+    private func secretRequest() -> ProxyApprovalRequest {
+        var r = request("build-cache.bushelops.com/auth/exchange/pat", method: "POST")
+        r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer {vzm:PAT}")]
+        r.body = ProxyApprovalBody(text: "request payload", warning: "")
+        r.secrets = ["PAT"]
+        return r
+    }
+
     private func service(engines: [any ApprovalEngine]? = nil, denyEngines: [any ApprovalEngine]? = nil) throws -> ApprovalService {
         let prompts = self.prompts!
         return try ApprovalService(
@@ -244,7 +259,7 @@ final class ApprovalTests: XCTestCase {
         mode.select(.auto)
         let service = try service()
         let requests = [
-            request("pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar"),
+            azureMavenRequest(),
             request("chatgpt.com/backend-api/codex/responses", type: "WEBSOCKET"),
             request("example.com:443", type: "TCP_CONNECT", method: "CONNECT"),
             request("example.com/repository", type: "GIT"),
@@ -358,6 +373,311 @@ final class ApprovalTests: XCTestCase {
             XCTAssertFalse(engine.isEligibleForAuto(invalid))
             if case .unknown = engine.handle(invalid) {} else { XCTFail("Invalid session matched") }
         }
+    }
+
+    func testSecretRequestPermanentApprovalSurvivesRestartAndOnlyAppliesInAuto() async throws {
+        let service = try service()
+        let r = secretRequest()
+        await prompts.setAction(.approveEngine)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+        await assertDecision(service, r, false)
+        mode.select(.approveEverything(until: Date().addingTimeInterval(60)))
+        await assertDecision(service, r, false)
+
+        store = try RecognizedElementStore(directoryURL: directory)
+        let restartedService = try self.service()
+        mode.select(.auto)
+        var changed = r
+        changed.headers = [ProxyApprovalHeader(name: "X-New-Header", value: "new value")]
+        changed.body = ProxyApprovalBody(text: "different payload", warning: "different warning")
+        await assertDecision(restartedService, changed, true)
+        changed.headers = []
+        changed.body = nil
+        await assertDecision(restartedService, changed, true)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, 3)
+    }
+
+    func testSecretRequestDenyAndApproveOnceDoNotPersistRule() async throws {
+        mode.select(.auto)
+        let service = try service()
+        let r = secretRequest()
+        await assertDecision(service, r, false)
+        await prompts.setAction(.approveOnce)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+        await assertDecision(service, r, false)
+        let restartedService = try self.service()
+        await assertDecision(restartedService, r, false)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, 4)
+    }
+
+    func testSecretRequestRuleMatchesExactMethodURLAndSecretSet() {
+        let engine = SecretRequestApprovalEngine(recognizedElementStore: store)
+        var r = secretRequest()
+        r.secrets = ["PAT", "SECOND"]
+        XCTAssertFalse(engine.isEligibleForAuto(r))
+        engine.onEngineApproved(r)
+        var reordered = r
+        reordered.secrets = ["SECOND", "PAT", "PAT"]
+        XCTAssertTrue(engine.isEligibleForAuto(reordered))
+
+        var changed = r
+        changed.method = "GET"
+        XCTAssertFalse(engine.isEligibleForAuto(changed))
+        changed.method = "post"
+        XCTAssertFalse(engine.isEligibleForAuto(changed))
+        for url in ["other.example/auth/exchange/pat", "build-cache.bushelops.com/auth/exchange/other", r.url + "?extra=1", r.url + "/"] {
+            changed = r
+            changed.url = url
+            XCTAssertFalse(engine.isEligibleForAuto(changed))
+        }
+        for secrets in [["PAT"], ["SECOND"], ["PAT", "SECOND", "THIRD"], ["different"], ["pat", "SECOND"]] {
+            changed = r
+            changed.secrets = secrets
+            XCTAssertFalse(engine.isEligibleForAuto(changed))
+        }
+
+        // Structured keys must not collide when secret names contain separators.
+        r.secrets = ["a\nb", "c"]
+        engine.onEngineApproved(r)
+        changed = r
+        changed.secrets = ["a", "b\nc"]
+        XCTAssertFalse(engine.isEligibleForAuto(changed))
+    }
+
+    func testSecretRequestEngineExcludesOtherTypesAndInvalidRules() {
+        let engine = SecretRequestApprovalEngine(recognizedElementStore: store)
+        let r = secretRequest()
+        engine.onEngineApproved(r)
+        var invalidRequests: [ProxyApprovalRequest] = []
+        for type in ["CONNECT", "TCP_CONNECT", "GIT", "WEBSOCKET"] {
+            var invalid = r
+            invalid.type = type
+            invalidRequests.append(invalid)
+        }
+        var invalid = r
+        invalid.method = ""
+        invalidRequests.append(invalid)
+        invalid = r
+        invalid.url = ""
+        invalidRequests.append(invalid)
+        for secrets in [[String](), [""], [" \n\t"], ["PAT", ""]] {
+            invalid = r
+            invalid.secrets = secrets
+            invalidRequests.append(invalid)
+        }
+        for invalid in invalidRequests {
+            XCTAssertFalse(engine.isEligibleForAuto(invalid))
+            if case .unknown = engine.handle(invalid) {} else { XCTFail("Invalid secret request matched") }
+            engine.onEngineApproved(invalid)
+        }
+    }
+
+    func testSecretRequestCustomPromptPreservesDetailsWarningsAndSafeActions() async throws {
+        let service = try service()
+        var r = secretRequest()
+        r.headers.append(ProxyApprovalHeader(name: "Host", value: r.domain))
+        r.body?.warning = "Body display warning"
+        await assertDecision(service, r, false)
+        let presentations = await prompts.presentations
+        let presentation = try XCTUnwrap(presentations.first)
+        XCTAssertEqual(presentation.title, "Secret access approval")
+        XCTAssertTrue(presentation.warnings.contains("Warning: new domain."))
+        XCTAssertTrue(presentation.warnings.contains("Body display warning"))
+        XCTAssertTrue(presentation.warnings.contains {
+            $0.contains("permanent approval to disk") && $0.contains("request body or other headers change")
+        })
+        XCTAssertEqual(presentation.sections.first { $0.title == "URL" }?.text, "POST \(r.url)")
+        XCTAssertEqual(presentation.sections.first { $0.title == "Secrets" }?.text, "PAT")
+        XCTAssertEqual(presentation.sections.first { $0.title == "Headers" }?.text, "Authorization: Bearer {vzm:PAT}")
+        XCTAssertEqual(presentation.sections.first { $0.title == "Body" }?.text, r.body?.text)
+        XCTAssertEqual(presentation.actions.map(\.id), [.deny, .approveEngine, .approveOnce])
+        let permanent = try XCTUnwrap(presentation.actions.first { $0.id == .approveEngine })
+        XCTAssertEqual(permanent.label, "♾️ Always allow in Auto")
+        XCTAssertNil(permanent.keyboardShortcut)
+        XCTAssertEqual(presentation.actions.first { $0.id == .approveOnce }?.keyboardShortcut, .defaultAction)
+        XCTAssertEqual(presentation.actions.first { $0.id == .deny }?.keyboardShortcut, .cancelAction)
+    }
+
+    func testAzureMavenPromptTakesPrecedenceOverSecretRequestPrompt() async throws {
+        let service = try service()
+        await assertDecision(service, azureMavenRequest(), false)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.first?.title, "Outbound")
+        XCTAssertEqual(presentations.first?.subtitle, "🚂 available: AzureDevOpsMaven")
+        XCTAssertEqual(presentations.first?.actions.first { $0.id == .approveEngine }?.label, "🚂 Approve engine")
+    }
+
+    func testAzureMavenAutoReusesConsentAcrossFeedsInMemoryOnly() async throws {
+        let service = try service()
+        mode.select(.auto)
+        let r = azureMavenRequest()
+        await assertDecision(service, r, false)
+        await prompts.setAction(.approveEngine)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+
+        var otherFeed = azureMavenRequest(organization: "another-org", feed: "another-feed")
+        otherFeed.method = "HEAD"
+        await assertDecision(service, otherFeed, true)
+        mode.select(.default)
+        await assertDecision(service, otherFeed, false)
+        mode.select(.auto)
+        await assertDecision(service, otherFeed, true)
+
+        var changed = otherFeed
+        changed.secrets.append("NEW_SECRET")
+        await assertDecision(service, changed, false)
+        changed = otherFeed
+        changed.headers.append(ProxyApprovalHeader(name: "X-New", value: "new value"))
+        await assertDecision(service, changed, false)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, 5)
+
+        store = try RecognizedElementStore(directoryURL: directory)
+        let restartedService = try self.service()
+        await assertDecision(restartedService, r, false)
+        await assertDecision(restartedService, otherFeed, false)
+    }
+
+    func testAzureMavenDenyAndApproveOnceDoNotEstablishAutoConsent() async throws {
+        mode.select(.auto)
+        let service = try service()
+        let r = azureMavenRequest()
+        await assertDecision(service, r, false)
+        await prompts.setAction(.approveOnce)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+        await assertDecision(service, r, false)
+        await assertDecision(service, azureMavenRequest(feed: "another-feed"), false)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, 4)
+    }
+
+    func testAzureMavenAutoValidatesPatternHeadersAndSecretNames() {
+        let engine = AzureDevOpsMavenApprovalEngine()
+        var readOnly = azureMavenRequest()
+        readOnly.headers = []
+        readOnly.secrets = []
+        XCTAssertTrue(engine.isEligibleForAuto(readOnly))
+        let r = azureMavenRequest()
+        XCTAssertFalse(engine.isEligibleForAuto(r))
+        engine.onEngineApproved(r)
+        XCTAssertTrue(engine.isEligibleForAuto(r))
+
+        var another = azureMavenRequest(organization: "other", feed: "other")
+        another.secrets = ["SECOND"]
+        XCTAssertFalse(engine.isEligibleForAuto(another))
+        engine.onEngineApproved(another)
+        another.secrets = ["PAT", "SECOND", "PAT"]
+        XCTAssertTrue(engine.isEligibleForAuto(another))
+        another.secrets = ["pat"]
+        XCTAssertFalse(engine.isEligibleForAuto(another))
+        another = r
+        another.headers = [ProxyApprovalHeader(name: "Authorization", value: "different value")]
+        XCTAssertFalse(engine.isEligibleForAuto(another))
+
+        var invalidRequests: [ProxyApprovalRequest] = []
+        for type in ["CONNECT", "TCP_CONNECT", "WEBSOCKET", "GIT"] {
+            var invalid = r
+            invalid.type = type
+            invalidRequests.append(invalid)
+        }
+        var invalid = r
+        invalid.method = "POST"
+        invalidRequests.append(invalid)
+        invalid = r
+        invalid.body = ProxyApprovalBody(text: "payload", warning: "")
+        invalidRequests.append(invalid)
+        for url in [
+            "example.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar",
+            r.url + "?extra=1", r.url + "#fragment",
+            "pkgs.dev.azure.com/org/_packaging/feed/npm/v1/org/example/lib/1.0/lib-1.0.jar",
+            "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/other-1.0.jar",
+            "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar.sha256",
+        ] {
+            invalid = r
+            invalid.url = url
+            invalidRequests.append(invalid)
+        }
+        for invalid in invalidRequests {
+            XCTAssertFalse(engine.isEligibleForAuto(invalid))
+            if case .unknown = engine.handle(invalid) {} else { XCTFail("Invalid Maven request matched") }
+            var invalidConsent = invalid
+            invalidConsent.secrets = ["UNAPPROVED"]
+            engine.onEngineApproved(invalidConsent)
+        }
+        another = r
+        another.secrets = ["UNAPPROVED"]
+        XCTAssertFalse(engine.isEligibleForAuto(another))
+    }
+
+    func testAzureMavenAutoDoesNotConsumeGatesAndBypassesExhaustedSession() {
+        let engine = AzureDevOpsMavenApprovalEngine()
+        let r = azureMavenRequest()
+        engine.onEngineApproved(r)
+        for _ in 0..<200 { XCTAssertTrue(engine.isEligibleForAuto(r)) }
+        for _ in 0..<120 {
+            if case .approved = engine.handle(r) {} else { XCTFail("Auto consumed session gates") }
+        }
+        if case .userApprovalRequired = engine.handle(r) {} else { XCTFail("Rate limit was not enforced") }
+        XCTAssertTrue(engine.isEligibleForAuto(r))
+    }
+
+    func testAzureMavenCanFallBackToExistingPermanentSecretRule() async throws {
+        let r = azureMavenRequest()
+        let secretEngine = SecretRequestApprovalEngine(recognizedElementStore: store)
+        secretEngine.onEngineApproved(r)
+        let service = try service()
+        mode.select(.auto)
+        await assertDecision(service, r, true)
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+    }
+
+    func testSecretRequestRulesDoNotBypassDenyEnginesOrNewConnectConsent() async throws {
+        let engine = SecretRequestApprovalEngine(recognizedElementStore: store)
+        var blocked = secretRequest()
+        blocked.domain = "telemetry.nextjs.org"
+        blocked.url = "telemetry.nextjs.org/collect"
+        engine.onEngineApproved(blocked)
+        let service = try service()
+        mode.select(.auto)
+        await assertDecision(service, blocked, false)
+        let deniedPresentations = await prompts.presentations
+        XCTAssertTrue(deniedPresentations.isEmpty)
+
+        engine.onEngineApproved(secretRequest())
+        var connect = request("build-cache.bushelops.com:443", type: "CONNECT", method: "CONNECT")
+        connect.domain = "build-cache.bushelops.com"
+        await assertDecision(service, connect, false)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, 1)
+        XCTAssertEqual(presentations.first?.title, "Outbound")
+    }
+
+    func testSecretRequestStoreContainsOnlyRuleMetadata() throws {
+        let engine = SecretRequestApprovalEngine(recognizedElementStore: store)
+        engine.onEngineApproved(secretRequest())
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        XCTAssertEqual(files.count, 1)
+        let data = try String(contentsOf: XCTUnwrap(files.first), encoding: .utf8)
+        XCTAssertTrue(data.hasPrefix("autoApprovedSecretRequest\n"))
+        XCTAssertTrue(data.contains("PAT"))
+        XCTAssertTrue(data.contains("POST"))
+        XCTAssertFalse(data.contains("Bearer"))
+        XCTAssertFalse(data.contains("request payload"))
+    }
+
+    func testSecretRequestPersistenceFailureDoesNotGrantAutoApproval() throws {
+        let engine = SecretRequestApprovalEngine(recognizedElementStore: store)
+        try FileManager.default.removeItem(at: directory)
+        try Data("not a directory".utf8).write(to: directory)
+        engine.onEngineApproved(secretRequest())
+        XCTAssertFalse(engine.isEligibleForAuto(secretRequest()))
     }
 
     func testQueuedRequestIsReevaluatedAfterModeChange() async throws {

@@ -67,11 +67,12 @@ actor ApprovalService {
         ]
         self.rawTCPApprovalEngine = RawTCPApprovalEngine()
         self.engines = engines ?? [
+            AzureDevOpsMavenApprovalEngine(),
+            SecretRequestApprovalEngine(recognizedElementStore: recognizedElementStore),
             ChatGPTApprovalEngine(),
             IntelliJApprovalEngine(),
             GradleDistributionApprovalEngine(),
             MavenRepositoryApprovalEngine(),
-            AzureDevOpsMavenApprovalEngine(),
             DockerHubApprovalEngine(),
             NixCacheApprovalEngine(),
             NixGitHubApprovalEngine(),
@@ -281,39 +282,9 @@ actor ApprovalService {
             title: "Outbound",
             subtitle: pendingApproval.selectedEngine.map { "🚂 available: \($0.engine.name)" },
             warnings: pendingApproval.warnings,
-            sections: buildDefaultSections(for: request),
+            sections: ApprovalPromptSection.requestDetails(for: request),
             actions: buildDefaultActions(hasEngine: pendingApproval.selectedEngine != nil)
         )
-    }
-
-    private func buildDefaultSections(for request: ProxyApprovalRequest) -> [ApprovalPromptSection] {
-        var sections: [ApprovalPromptSection] = [
-            ApprovalPromptSection(title: "Type", text: request.type),
-            ApprovalPromptSection(title: "URL", text: "\(request.method) \(request.url)"),
-        ]
-
-        if !request.domain.isEmpty {
-            sections.append(ApprovalPromptSection(title: "Domain", text: request.domain))
-        }
-
-        if !request.headers.isEmpty {
-            sections.append(
-                ApprovalPromptSection(
-                    title: "Headers",
-                    text: request.headers.map { "\($0.name): \($0.value)" }.joined(separator: "\n")
-                )
-            )
-        }
-
-        if let body = request.body {
-            sections.append(ApprovalPromptSection(title: "Body", text: body.text))
-        }
-
-        if !request.secrets.isEmpty {
-            sections.append(ApprovalPromptSection(title: "Secrets", text: request.secrets.joined(separator: ", ")))
-        }
-
-        return sections
     }
 
     private func buildDefaultActions(hasEngine: Bool) -> [ApprovalPromptAction] {

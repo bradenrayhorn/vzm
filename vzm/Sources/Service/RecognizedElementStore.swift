@@ -5,6 +5,7 @@ enum RecognizedElementType: String {
     case domain
     case userAgent
     case approvedForeverRequest
+    case autoApprovedSecretRequest
 }
 
 final class RecognizedElementStore {
@@ -85,7 +86,7 @@ final class RecognizedElementStore {
             return domain
         case .userAgent:
             return element.trimmingCharacters(in: .whitespaces)
-        case .approvedForeverRequest:
+        case .approvedForeverRequest, .autoApprovedSecretRequest:
             return element
         }
     }
