@@ -133,6 +133,8 @@ final class ApprovalTests: XCTestCase {
             (DockerHubApprovalEngine(), "registry-1.docker.io/v2/library/alpine/manifests/latest", true),
             (NixCacheApprovalEngine(), "cache.nixos.org/nix-cache-info", false),
             (NixGitHubApprovalEngine(), "github.com/NixOS/nix/archive/\(String(repeating: "a", count: 40)).tar.gz", false),
+            (NixGitHubApprovalEngine(), "api.github.com/repos/NixOS/nixpkgs/commits/nixos-26.05", false),
+            (NixGitHubApprovalEngine(), "api.github.com/repos/NixOS/nixpkgs/commits/nixos-unstable", false),
             (YarnPkgApprovalEngine(), "registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz", false),
         ]
         for (engine, url, supportsHead) in patterns {
