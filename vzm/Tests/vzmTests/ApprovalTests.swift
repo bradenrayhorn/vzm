@@ -88,6 +88,14 @@ final class ApprovalTests: XCTestCase {
         return r
     }
 
+    private func azureNpmRequest(organization: String = "org", project: String? = nil, feed: String = "feed") -> ProxyApprovalRequest {
+        let prefix = project.map { "\(organization)/\($0)" } ?? organization
+        var r = request("pkgs.dev.azure.com/\(prefix)/_packaging/\(feed)/npm/registry/@scope%2fpackage")
+        r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer {vzm:PAT}")]
+        r.secrets = ["PAT"]
+        return r
+    }
+
     private func secretRequest() -> ProxyApprovalRequest {
         var r = request("build-cache.bushelops.com/auth/exchange/pat", method: "POST")
         r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer {vzm:PAT}")]
@@ -125,6 +133,304 @@ final class ApprovalTests: XCTestCase {
         XCTAssertEqual(ApprovalModeState().current(), .default)
     }
 
+    func testAcceptMediaTypesAndQualityValues() {
+        let r = request()
+        for value in [
+            "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*",
+            "*/*; q=0.2", "APPLICATION/JSON; Q=1.000", "text/html;q=0",
+            "image/gif; q=0.001, image/jpeg; q=0.999, text/event-stream",
+            "application/json; q=1", "application/json; q=0.", "application/json; q=1.",
+            "application/vnd.npm.install-v1+json", "application/json ; q = 0.80",
+            "application/json; q=2", "application/json; q=1.001", "application/json; q=.8",
+            "application/json; q=123.456", "application/json; q=999", "application/json; q=000.999",
+            "application/json; q=", "application/json; q=.",
+        ] {
+            var withHeader = r
+            withHeader.headers = [ProxyApprovalHeader(name: "Accept", value: value)]
+            XCTAssertTrue(ApprovalHeaderMasker.isSafe(withHeader.headers[0], in: r), value)
+            XCTAssertTrue(ApprovalHeaderMasker.maskSafeHeaders(for: withHeader, knownUserAgents: []).isEmpty, value)
+        }
+        for value in [
+            "", ",", "application/json,", ",application/json", "application/json,,*/*",
+            "text/custom", "application/json, text/custom", "application/json; charset=utf-8",
+            "application/json; q=-0.1", "application/json; q=+0.8", "application/json; q=0.1234",
+            "application/json; q=1234", "application/json; q=12.34.56", "application/json; q=1e2",
+            "application/json; q=NaN", "application/json; q=0.8; q=0.9",
+            "application/json; q=0.8; custom=value", "application/json; q=0.8=extra",
+            "application/json; q=\"0.8\"", "application/json;",
+        ] {
+            var withHeader = r
+            withHeader.headers = [ProxyApprovalHeader(name: "Accept", value: value)]
+            XCTAssertFalse(ApprovalHeaderMasker.isSafe(withHeader.headers[0], in: r), value)
+            XCTAssertEqual(ApprovalHeaderMasker.maskSafeHeaders(for: withHeader, knownUserAgents: []), withHeader.headers, value)
+        }
+    }
+
+    func testCommonAcceptMediaTypesAreMasked() {
+        let types = [
+            "text/plain", "application/octet-stream", "application/xhtml+xml", "application/xml", "text/xml",
+            "image/png", "image/webp", "image/avif", "image/svg+xml", "image/x-icon",
+            "text/css", "text/javascript", "application/javascript", "application/wasm",
+            "application/pdf", "application/zip", "application/gzip",
+            "application/problem+json", "application/vnd.api+json", "application/vnd.github+json",
+            "application/rss+xml", "application/atom+xml",
+        ]
+        for mediaType in types {
+            for value in [mediaType, "\(mediaType.uppercased()); q=0.8, */*; q=0.2"] {
+                var r = request()
+                r.headers = [ProxyApprovalHeader(name: "Accept", value: value)]
+                XCTAssertTrue(ApprovalHeaderMasker.maskSafeHeaders(for: r, knownUserAgents: []).isEmpty, value)
+            }
+        }
+        for value in [
+            "application/vnd.some-secret+json", "application/custom+xml", "image/*", "text/*",
+            "image/png; custom=secret", "application/pdf, application/vnd.some-secret+json",
+        ] {
+            var r = request()
+            r.headers = [ProxyApprovalHeader(name: "Accept", value: value)]
+            XCTAssertEqual(ApprovalHeaderMasker.maskSafeHeaders(for: r, knownUserAgents: []), r.headers, value)
+        }
+    }
+
+    func testYarnVersionRedirectAndMetadataSequenceInAuto() async throws {
+        mode.select(.auto)
+        let service = try service()
+        await assertDecision(service, request("yarnpkg.com/latest-version"), true)
+        var redirected = request("classic.yarnpkg.com/latest-version")
+        redirected.headers = [ProxyApprovalHeader(name: "Referer", value: "https://yarnpkg.com/latest-version")]
+        await assertDecision(service, redirected, true)
+        var metadata = request("registry.yarnpkg.com/@scope%2fpackage")
+        metadata.headers = [ProxyApprovalHeader(name: "Accept", value: "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*")]
+        await assertDecision(service, metadata, true)
+        await assertDecision(service, request("registry.yarnpkg.com/picocolors/-/picocolors-1.1.1.tgz"), true)
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+        XCTAssertFalse(store.contains("classic.yarnpkg.com", type: .domain))
+
+        for url in ["yarnpkg.com/latest-version", "registry.yarnpkg.com/package", "classic.yarnpkg.com/other"] {
+            var invalid = request(url)
+            invalid.headers = redirected.headers
+            XCTAssertFalse(YarnPkgApprovalEngine().isEligibleForAuto(invalid), url)
+        }
+        for referer in ["https://example.com/latest-version", "https://yarnpkg.com/latest-version?data=secret", "http://yarnpkg.com/latest-version"] {
+            redirected.headers[0].value = referer
+            await assertDecision(service, redirected, false)
+        }
+        XCTAssertFalse(ApprovalHeaderMasker.isSafe(
+            ProxyApprovalHeader(name: "Referer", value: "https://yarnpkg.com/latest-version"), in: redirected
+        ))
+    }
+
+    func testSharedNpmPackagePathValidation() {
+        let valid = [
+            "package", "@scope/package", "@scope%2fpackage", "@scope%2Fpackage",
+            "package/-/package-1.2.3.tgz", "@scope/package/-/package-1.2.3-beta.1+build.tgz",
+        ]
+        let invalid = [
+            "", ".", "..", "@./package", "@scope/..", "package/", "/package",
+            "@scope%252fpackage", "package%2fother", "@scope%2fpackage%2fother",
+            "package/1.2.3", "-/v1/search", "-/npm/v1/security/advisories/bulk",
+            "package/-/other-1.2.3.tgz", "@scope/package/-/other-1.2.3.tgz",
+            "package/-/package-.tgz", "package/-/package-1.2.3.zip",
+            "package/-/package-1.2.3.tgz/extra", "@scope%2fpackage/-/package-1.2.3.tgz",
+            "package?data=secret", "package#fragment", "package/-/package-1.0.tgz?sig=secret",
+            "../package", "package/../other", "%2e%2e", "package\nother",
+            String(repeating: "a", count: 129),
+        ]
+        for path in valid + invalid {
+            let expected = valid.contains(path)
+            XCTAssertEqual(NpmPackageURL.isPackagePath(path), expected, path)
+            XCTAssertEqual(NpmApprovalEngine().isEligibleForAuto(request("registry.npmjs.org/\(path)")), expected, path)
+            XCTAssertEqual(YarnPkgApprovalEngine().isEligibleForAuto(request("registry.yarnpkg.com/\(path)")), expected, path)
+            for prefix in ["org/_packaging/feed", "org/project/_packaging/feed"] {
+                XCTAssertEqual(AzureDevOpsNpmApprovalEngine().isEligibleForAuto(request("pkgs.dev.azure.com/\(prefix)/npm/registry/\(path)")), expected, path)
+            }
+        }
+        for url in [
+            "example.com/package", "registry.npmjs.org.evil.com/package",
+            "registry.npmjs.org:443/package", "user@registry.npmjs.org/package",
+            "https://registry.npmjs.org/package",
+        ] {
+            XCTAssertFalse(NpmApprovalEngine().isEligibleForAuto(request(url)), url)
+        }
+    }
+
+    func testObservedNpmAndAzureTarballsInAuto() async throws {
+        mode.select(.auto)
+        let service = try service()
+        let publicPackages = [
+            "@ai-sdk/provider-utils/-/provider-utils-4.0.33.tgz", "@ai-sdk/react/-/react-3.0.216.tgz",
+            "@ai-sdk/provider/-/provider-3.0.12.tgz", "ai/-/ai-6.0.214.tgz",
+            "@ai-sdk/gateway/-/gateway-3.0.139.tgz", "@opentelemetry/api/-/api-1.9.1.tgz",
+            "js-yaml/-/js-yaml-4.3.2.tgz", "semver/-/semver-7.8.5.tgz",
+            "@emnapi/runtime/-/runtime-1.11.3.tgz", "js-yaml/-/js-yaml-3.15.2.tgz",
+            "@typescript-eslint/eslint-plugin/-/eslint-plugin-8.46.3.tgz",
+            "@eslint-community/regexpp/-/regexpp-4.12.2.tgz",
+            "@typescript-eslint/scope-manager/-/scope-manager-8.46.3.tgz",
+            "@typescript-eslint/type-utils/-/type-utils-8.46.3.tgz", "@typescript-eslint/utils/-/utils-8.46.3.tgz",
+            "@typescript-eslint/visitor-keys/-/visitor-keys-8.46.3.tgz", "graphemer/-/graphemer-1.4.0.tgz",
+            "ignore/-/ignore-7.0.6.tgz", "@typescript-eslint/types/-/types-8.46.3.tgz",
+            "@typescript-eslint/typescript-estree/-/typescript-estree-8.46.3.tgz",
+            "@eslint-community/eslint-utils/-/eslint-utils-4.10.1.tgz",
+            "@typescript-eslint/project-service/-/project-service-8.46.3.tgz",
+            "@typescript-eslint/tsconfig-utils/-/tsconfig-utils-8.46.3.tgz",
+            "@typescript-eslint/tsconfig-utils/-/tsconfig-utils-8.65.0.tgz",
+            "@typescript-eslint/types/-/types-8.65.0.tgz", "fast-glob/-/fast-glob-3.3.3.tgz",
+            "micromatch/-/micromatch-4.0.8.tgz", "@typescript-eslint/parser/-/parser-8.46.3.tgz",
+            "typescript-eslint/-/typescript-eslint-8.46.3.tgz",
+        ]
+        for path in publicPackages {
+            await assertDecision(service, request("registry.npmjs.org/\(path)"), true)
+        }
+        for path in [
+            "@bushelpowered%2fbushel-web-offers",
+            "@bushelpowered/bushel-interfaces/-/bushel-interfaces-2.0.63.tgz",
+            "@bushelpowered/bushel-web-offers/-/bushel-web-offers-5.4.4.tgz",
+            "@bushelpowered/design-system/-/design-system-0.3.1.tgz",
+            "@bushelpowered/wallet-components/-/wallet-components-3.3.7.tgz",
+            "@bushelpowered/bushel-interfaces/-/bushel-interfaces-1.6.2081.tgz",
+            "@bushelpowered/design-system/-/design-system-0.2.4.tgz",
+        ] {
+            await assertDecision(service, request("pkgs.dev.azure.com/bushelpowered/_packaging/bushelpowered/npm/registry/\(path)"), true)
+        }
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+        await assertDecision(service, request("p2ovsblobprodcus312.blob.core.windows.net/container/artifact.blob?sp=r"), false)
+        await assertDecision(service, request("p2ovsblobprodcus312.blob.core.windows.net:443", type: "CONNECT", method: "CONNECT"), false)
+    }
+
+    func testNpmOrdinaryApprovalDoesNotActivateEngine() async throws {
+        let service = try service(engines: [NpmApprovalEngine()])
+        let r = request("registry.npmjs.org/package")
+        await prompts.setAction(.approveOnce)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+        await assertDecision(service, r, false)
+        await prompts.setAction(.approveEngine)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+        await assertDecision(service, request("registry.npmjs.org/package/-/package-1.0.tgz"), true)
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.count, 3)
+        XCTAssertEqual(presentations.first?.subtitle, "🚂 available: Npm")
+    }
+
+    func testAzureNpmConsentScopePrecedenceAndRestart() async throws {
+        mode.select(.auto)
+        let service = try service()
+        let r = azureNpmRequest()
+        await assertDecision(service, r, false)
+        await prompts.setAction(.approveOnce)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+        await assertDecision(service, r, false)
+        await prompts.setAction(.approveEngine)
+        await assertDecision(service, r, true)
+        await prompts.setAction(.deny)
+
+        var another = azureNpmRequest(organization: "other", project: "project", feed: "another")
+        another.method = "HEAD"
+        await assertDecision(service, another, true)
+        mode.select(.default)
+        await assertDecision(service, another, false)
+        await assertDecision(service, r, true)
+        var otherProject = azureNpmRequest(project: "project")
+        await assertDecision(service, otherProject, false)
+        mode.select(.auto)
+        await assertDecision(service, otherProject, true)
+        otherProject.headers.append(ProxyApprovalHeader(name: "X-New", value: "data"))
+        await assertDecision(service, otherProject, false)
+        another.secrets.append("NEW_SECRET")
+        await assertDecision(service, another, false)
+        another = r
+        another.headers[0].value = "Bearer changed"
+        await assertDecision(service, another, false)
+
+        let presentations = await prompts.presentations
+        XCTAssertEqual(presentations.first?.subtitle, "🚂 available: AzureDevOpsNpm")
+        XCTAssertEqual(presentations.first?.actions.first { $0.id == .approveEngine }?.label, "🚂 Approve engine")
+        let restarted = try self.service()
+        await assertDecision(restarted, r, false)
+    }
+
+    func testNpmEnginesRestrictionsAndExplicitHeaderConsent() {
+        for engine in [NpmApprovalEngine(), AzureDevOpsNpmApprovalEngine()] as [any ApprovalEngine] {
+            let url = engine.name == "Npm" ? "registry.npmjs.org/package" : "pkgs.dev.azure.com/org/_packaging/feed/npm/registry/package"
+            var r = request(url)
+            XCTAssertTrue(engine.isEligibleForAuto(r))
+            r.headers = [ProxyApprovalHeader(name: "X-Custom", value: "approved")]
+            XCTAssertFalse(engine.isEligibleForAuto(r))
+            engine.onEngineApproved(r)
+            XCTAssertTrue(engine.isEligibleForAuto(r))
+            r.headers[0].value = "changed"
+            XCTAssertFalse(engine.isEligibleForAuto(r))
+            if case .userApprovalRequired = engine.handle(r) {} else { XCTFail("New header must prompt") }
+            for type in ["CONNECT", "TCP_CONNECT", "GIT", "WEBSOCKET"] {
+                let invalid = request(url, type: type)
+                XCTAssertFalse(engine.isEligibleForAuto(invalid))
+                if case .unknown = engine.handle(invalid) {} else { XCTFail("Wrong request type matched") }
+            }
+            for method in ["POST", "PUT", "DELETE", "PATCH"] {
+                XCTAssertFalse(engine.isEligibleForAuto(request(url, method: method)))
+            }
+            r = request(url)
+            r.body = ProxyApprovalBody(text: "payload", warning: "")
+            XCTAssertFalse(engine.isEligibleForAuto(r))
+            r = request(url)
+            r.secrets = ["UNAPPROVED"]
+            XCTAssertFalse(engine.isEligibleForAuto(r))
+        }
+        var credentialed = azureNpmRequest()
+        let azure = AzureDevOpsNpmApprovalEngine()
+        XCTAssertFalse(azure.isEligibleForAuto(credentialed))
+        azure.onEngineApproved(credentialed)
+        credentialed.secrets = ["PAT", "PAT"]
+        XCTAssertTrue(azure.isEligibleForAuto(credentialed))
+        credentialed.secrets = ["pat"]
+        XCTAssertFalse(azure.isEligibleForAuto(credentialed))
+
+        for url in [
+            "example.com/org/_packaging/feed/npm/registry/package",
+            "pkgs.dev.azure.com:443/org/_packaging/feed/npm/registry/package",
+            "pkgs.dev.azure.com/org/_packaging/feed/npm/v1/package",
+            "pkgs.dev.azure.com/org/_packaging/feed/maven/registry/package",
+            "pkgs.dev.azure.com/org/_packaging//npm/registry/package",
+            "pkgs.dev.azure.com/../_packaging/feed/npm/registry/package",
+            "pkgs.dev.azure.com/org/../_packaging/feed/npm/registry/package",
+            "pkgs.dev.azure.com/org/_packaging/feed/npm/registry/package?data=secret",
+        ] {
+            var invalid = request(url)
+            invalid.secrets = ["UNAPPROVED"]
+            XCTAssertFalse(azure.isEligibleForAuto(invalid), url)
+            if case .unknown = azure.handle(invalid) {} else { XCTFail("Invalid feed URL matched: \(url)") }
+            azure.onEngineApproved(invalid)
+        }
+        credentialed = azureNpmRequest()
+        credentialed.secrets = ["UNAPPROVED"]
+        XCTAssertFalse(azure.isEligibleForAuto(credentialed))
+    }
+
+    func testNpmAutoDoesNotConsumeOrActivateSessionGates() {
+        let npm = NpmApprovalEngine()
+        let azure = AzureDevOpsNpmApprovalEngine()
+        for (engine, r, limit) in [
+            (npm as any ApprovalEngine, request("registry.npmjs.org/package"), 2_000),
+            (azure as any ApprovalEngine, azureNpmRequest(), 120),
+        ] {
+            engine.onEngineApproved(r)
+            for _ in 0..<limit + 1 { XCTAssertTrue(engine.isEligibleForAuto(r)) }
+            for _ in 0..<limit {
+                if case .approved = engine.handle(r) {} else { XCTFail("Auto consumed session gates") }
+            }
+            if case .userApprovalRequired = engine.handle(r) {} else { XCTFail("Rate limit not enforced") }
+            XCTAssertTrue(engine.isEligibleForAuto(r))
+        }
+        let fresh = NpmApprovalEngine()
+        let r = request("registry.npmjs.org/package")
+        XCTAssertTrue(fresh.isEligibleForAuto(r))
+        if case .userApprovalRequired = fresh.handle(r) {} else { XCTFail("Auto established consent") }
+    }
+
     func testAllEligiblePatternsAndRestrictions() {
         let patterns: [(PatternApprovalEngine, String, Bool)] = [
             (IntelliJApprovalEngine(), "download.jetbrains.com/jdk/feed/test.json", true),
@@ -136,6 +442,7 @@ final class ApprovalTests: XCTestCase {
             (NixGitHubApprovalEngine(), "api.github.com/repos/NixOS/nixpkgs/commits/nixos-26.05", false),
             (NixGitHubApprovalEngine(), "api.github.com/repos/NixOS/nixpkgs/commits/nixos-unstable", false),
             (YarnPkgApprovalEngine(), "registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz", false),
+            (NpmApprovalEngine(), "registry.npmjs.org/lodash/-/lodash-4.17.21.tgz", false),
         ]
         for (engine, url, supportsHead) in patterns {
             var r = request(url)

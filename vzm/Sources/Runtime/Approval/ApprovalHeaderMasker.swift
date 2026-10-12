@@ -17,7 +17,17 @@ enum ApprovalHeaderMasker {
         "sec-fetch-site": ["same-origin", "cross-site"],
     ]
 
-    private static let safeAccept: Set<String> = ["text/html", "image/gif", "image/jpeg", "*/*; q=0.2", "*/*", "application/json", "text/event-stream"]
+    private static let safeAccept: Set<String> = [
+        "*/*",
+        "text/html", "text/plain", "text/xml", "text/css", "text/javascript", "text/event-stream",
+        "image/gif", "image/jpeg", "image/png", "image/webp", "image/avif", "image/svg+xml", "image/x-icon",
+        "application/octet-stream", "application/xhtml+xml", "application/xml",
+        "application/javascript", "application/wasm", "application/pdf", "application/zip", "application/gzip",
+        "application/json", "application/problem+json", "application/vnd.api+json",
+        "application/vnd.github+json", "application/vnd.npm.install-v1+json",
+        "application/rss+xml", "application/atom+xml",
+    ]
+    private static let qualityRegex = try! NSRegularExpression(pattern: #"\A[0-9]{0,3}(?:\.[0-9]{0,3})?\z"#)
     private static let safeEncodings: Set<String> = ["zstd", "br", "gzip", "deflate", "bzip2", "xz"]
 
     static func maskSafeHeaders(for request: ProxyApprovalRequest, knownUserAgents: [String]) -> [ProxyApprovalHeader] {
@@ -37,6 +47,21 @@ enum ApprovalHeaderMasker {
         }.map { $0.value }
     }
 
+    private static func isSafeAcceptItem(_ item: String) -> Bool {
+        let parts = item.split(separator: ";", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        guard let mediaType = parts.first, safeAccept.contains(mediaType), parts.count <= 2 else { return false }
+        if parts.count == 1 { return true }
+
+        let parameter = parts[1].split(separator: "=", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard parameter.count == 2, parameter[0] == "q" else { return false }
+
+        let quality = parameter[1]
+        return qualityRegex.firstMatch(in: quality, range: NSRange(quality.startIndex..<quality.endIndex, in: quality)) != nil
+    }
+
     static func isSafe(_ header: ProxyApprovalHeader, in request: ProxyApprovalRequest) -> Bool {
         let name = header.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let value = header.value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -52,7 +77,7 @@ enum ApprovalHeaderMasker {
         case "accept":
             let accepts = value.split(separator: ",", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            return !accepts.isEmpty && accepts.allSatisfy { safeAccept.contains($0) }
+            return !accepts.isEmpty && accepts.allSatisfy(isSafeAcceptItem)
         case "content-length":
             return value == "0"
         case ":method":
