@@ -11,6 +11,15 @@ final class DockerHubApprovalEngine: PatternApprovalEngine {
         pattern: #"^/registry-v2/docker/registry/v2/blobs/sha256/([0-9a-f]{2})/\1[0-9a-f]{62}/data$"#
     )
 
+    private static let pullMediaTypes: Set<String> = [
+        "application/vnd.docker.distribution.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v1+prettyjws",
+        "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.oci.image.index.v1+json",
+    ]
+
     init() {
         super.init(gateBuilders: [
             TimeWindowApprovalGate.new(durationSeconds: 10 * 60),
@@ -25,6 +34,27 @@ final class DockerHubApprovalEngine: PatternApprovalEngine {
             && request.body == nil
             && (request.method == "GET" || request.method == "HEAD")
             && isDockerHubPullURL(request.url)
+    }
+
+    override func headersForApproval(_ request: ProxyApprovalRequest) -> [ProxyApprovalHeader] {
+        // Never apply this policy to requests outside the read-only pull protocol.
+        guard matches(request) else { return request.headers }
+        return request.headers.filter { header in
+            let name = header.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if name == "authorization" {
+                // Credentials referenced through vzm secrets are excluded by matches().
+                return false
+            }
+            if name == "accept" {
+                let types = header.value.split(separator: ",", omittingEmptySubsequences: false)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                return !types.allSatisfy {
+                    Self.pullMediaTypes.contains($0)
+                        || ApprovalHeaderMasker.isSafe(ProxyApprovalHeader(name: "Accept", value: $0), in: request)
+                }
+            }
+            return true
+        }
     }
 
     private func isDockerHubPullURL(_ url: String) -> Bool {

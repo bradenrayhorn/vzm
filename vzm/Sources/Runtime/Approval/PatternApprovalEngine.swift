@@ -9,8 +9,13 @@ class PatternApprovalEngine: BaseApprovalEngine {
         false
     }
 
+    /// Headers requiring explicit consent after engine-specific protocol filtering.
+    func headersForApproval(_ request: ProxyApprovalRequest) -> [ProxyApprovalHeader] {
+        request.headers
+    }
+
     override func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
-        matches(request) && (request.headers.isEmpty || headersWereApproved(request))
+        matches(request) && (headersForApproval(request).isEmpty || headersWereApproved(request))
     }
 
     override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
@@ -23,11 +28,11 @@ class PatternApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
+        approvedHeaders = (approvedHeaders ?? []).union(Set(headersForApproval(request)))
         super.onEngineApproved(request)
     }
 
     private func headersWereApproved(_ request: ProxyApprovalRequest) -> Bool {
-        approvedHeaders?.isSuperset(of: Set(request.headers)) == true
+        approvedHeaders?.isSuperset(of: Set(headersForApproval(request))) == true
     }
 }

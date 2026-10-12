@@ -158,6 +158,91 @@ final class ApprovalTests: XCTestCase {
         }
     }
 
+    func testDockerHubPullSequenceInAuto() async throws {
+        let service = try service(engines: [DockerHubApprovalEngine()])
+        mode.select(.auto)
+        let digest = String(repeating: "a", count: 64)
+        for repository in ["library/mysql", "eqalpha/keydb"] {
+            let urls = [
+                "registry-1.docker.io/v2/\(repository)/manifests/8.4",
+                "auth.docker.io/token?scope=repository%3A\(repository.replacingOccurrences(of: "/", with: "%2F"))%3Apull&service=registry.docker.io",
+                "registry-1.docker.io/v2/\(repository)/manifests/sha256:\(digest)",
+                "registry-1.docker.io/v2/\(repository)/referrers/sha256:\(digest)",
+                "registry-1.docker.io/v2/\(repository)/blobs/sha256:\(digest)",
+                "production.cloudfront.docker.com/registry-v2/docker/registry/v2/blobs/sha256/aa/\(digest)/data?Expires=1791820895&Signature=example~__&Key-Pair-Id=K2C9XPB6FLAKUF",
+            ]
+            for url in urls {
+                for method in ["HEAD", "GET"] {
+                    var r = request(url, method: method)
+                    r.headers = [
+                        ProxyApprovalHeader(name: "aUtHoRiZaTiOn", value: "Bearer \(UUID().uuidString)"),
+                        ProxyApprovalHeader(name: "Accept", value: "application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/json"),
+                    ]
+                    await assertDecision(service, r, true)
+                }
+            }
+        }
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+    }
+
+    func testDockerHubHeaderConsentAndTokenRotation() {
+        let engine = DockerHubApprovalEngine()
+        var r = request("registry-1.docker.io/v2/library/mysql/manifests/8.4")
+        r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Basic arbitrary")]
+        XCTAssertTrue(engine.isEligibleForAuto(r))
+        if case .userApprovalRequired = engine.handle(r) {} else { XCTFail("Default needs engine consent") }
+
+        r.headers.append(ProxyApprovalHeader(name: "X-Custom", value: "approved"))
+        XCTAssertFalse(engine.isEligibleForAuto(r))
+        engine.onEngineApproved(r)
+        r.headers[0].value = "Bearer rotated-token"
+        XCTAssertTrue(engine.isEligibleForAuto(r))
+        if case .approved = engine.handle(r) {} else { XCTFail("Token rotation should retain consent") }
+        r.headers[1].value = "changed"
+        XCTAssertFalse(engine.isEligibleForAuto(r))
+        if case .userApprovalRequired = engine.handle(r) {} else { XCTFail("Unknown headers need consent") }
+
+        let otherEngine = NixCacheApprovalEngine()
+        var other = request()
+        other.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer token")]
+        XCTAssertFalse(otherEngine.isEligibleForAuto(other))
+    }
+
+    func testDockerHubHeaderFilteringPreservesRestrictions() {
+        let engine = DockerHubApprovalEngine()
+        var r = request("registry-1.docker.io/v2/library/mysql/manifests/8.4")
+        r.headers = [ProxyApprovalHeader(name: "Authorization", value: "anything")]
+        for mediaType in [
+            "application/vnd.docker.distribution.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v1+prettyjws",
+            "APPLICATION/VND.OCI.IMAGE.INDEX.V1+JSON",
+        ] {
+            r.headers.append(ProxyApprovalHeader(name: "Accept", value: mediaType))
+            XCTAssertTrue(engine.isEligibleForAuto(r))
+            r.headers.removeLast()
+        }
+        for value in ["", "text/custom", "application/vnd.oci.image.index.v1+json,", "application/vnd.oci.image.index.v1+json; custom=value"] {
+            var invalid = r
+            invalid.headers.append(ProxyApprovalHeader(name: "Accept", value: value))
+            XCTAssertFalse(engine.isEligibleForAuto(invalid))
+        }
+        var invalid = r
+        invalid.secrets = ["TOKEN"]
+        XCTAssertFalse(engine.isEligibleForAuto(invalid))
+        invalid = r
+        invalid.body = ProxyApprovalBody(text: "payload", warning: "")
+        XCTAssertFalse(engine.isEligibleForAuto(invalid))
+        invalid = r
+        invalid.method = "POST"
+        XCTAssertFalse(engine.isEligibleForAuto(invalid))
+        for url in ["example.com/v2/library/mysql/manifests/8.4", "registry-1.docker.io/v2/library/mysql/blobs/uploads/"] {
+            invalid = r
+            invalid.url = url
+            XCTAssertFalse(engine.isEligibleForAuto(invalid))
+        }
+    }
+
     func testAutoDoesNotConsumeGatesOrDiscardExplicitSession() async throws {
         let gate = CountingGate()
         gate.isOpen = false
