@@ -25,17 +25,25 @@ struct VZMMenuBarApp: App {
 
     @State private var approvalModeCoordinator = ApprovalModeCoordinator.shared
     @State private var portExposureCoordinator = PortExposureCoordinator.shared
+    @State private var activityCoordinator = ProxyActivityCoordinator.shared
 
     var body: some Scene {
-        MenuBarExtra("vm") {
+        MenuBarExtra {
             VStack {
                 Text("VM Running...")
                 Divider()
                 ApprovalModeMenuView(coordinator: approvalModeCoordinator)
                 Divider()
                 PortExposureMenuView(coordinator: portExposureCoordinator)
+                Divider()
+                ProxyActivityMenuView(snapshot: activityCoordinator.snapshot)
             }
             .padding(.vertical, 4)
+        } label: {
+            ProxyActivityMenuBarLabel(
+                vmName: activityCoordinator.vmName ?? "vm",
+                snapshot: activityCoordinator.snapshot
+            )
         }
     }
 }

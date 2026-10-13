@@ -40,6 +40,8 @@ final class ProxyService {
     private let controlSocketURL: URL
     private let caCertificateURL: URL
     private let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    private let activityMonitor = ProxyActivityMonitor()
+    private let activityRecorder: ProxyActivityRecorder
 
     private var process: Process?
     private var controlChannel: Channel?
@@ -67,9 +69,13 @@ final class ProxyService {
         self.gitSocketURL = runDirectoryURL.appendingPathComponent("git.sock")
         self.controlSocketURL = runDirectoryURL.appendingPathComponent("control.sock")
         self.caCertificateURL = runDirectoryURL.appendingPathComponent("ca.pem")
+        self.activityRecorder = ProxyActivityRecorder(eventLoop: eventLoopGroup.next(), monitor: activityMonitor)
     }
 
     func launch() async throws {
+        let activityRecorder = self.activityRecorder
+        try await activityRecorder.eventLoop.submit { activityRecorder.start() }.get()
+        await ProxyActivityCoordinator.shared.attach(monitor: activityMonitor, vmName: vmName)
         controlChannel = try await startApprovalControlSocket()
 
         let process = Process()
@@ -101,7 +107,7 @@ final class ProxyService {
         let proxyListener = VZVirtioSocketListener()
         let proxyListenerDelegate = VsockUnixBridgeDelegate(
             unixSocketPath: proxySocketURL.path,
-            eventLoopGroup: eventLoopGroup
+            activityRecorder: activityRecorder
         )
         proxyListener.delegate = proxyListenerDelegate
         virtioDevice.setSocketListener(proxyListener, forPort: Self.proxyVsockPort)
@@ -109,7 +115,7 @@ final class ProxyService {
         let rawTCPListener = VZVirtioSocketListener()
         let rawTCPListenerDelegate = VsockUnixBridgeDelegate(
             unixSocketPath: rawTCPSocketURL.path,
-            eventLoopGroup: eventLoopGroup
+            activityRecorder: activityRecorder
         )
         rawTCPListener.delegate = rawTCPListenerDelegate
         virtioDevice.setSocketListener(rawTCPListener, forPort: Self.rawTCPVsockPort)
@@ -117,7 +123,7 @@ final class ProxyService {
         let gitListener = VZVirtioSocketListener()
         let gitListenerDelegate = VsockUnixBridgeDelegate(
             unixSocketPath: gitSocketURL.path,
-            eventLoopGroup: eventLoopGroup
+            activityRecorder: activityRecorder
         )
         gitListener.delegate = gitListenerDelegate
         virtioDevice.setSocketListener(gitListener, forPort: Self.gitVsockPort)
@@ -152,6 +158,9 @@ final class ProxyService {
             return
         }
         stopped = true
+        let activityRecorder = self.activityRecorder
+        try? await activityRecorder.eventLoop.submit { activityRecorder.stop() }.get()
+        await ProxyActivityCoordinator.shared.detach()
 
         await detach()
 
@@ -200,9 +209,10 @@ final class ProxyService {
     }
 
     private func startApprovalControlSocket() async throws -> Channel {
-        let channel = try await ServerBootstrap(group: eventLoopGroup)
+        let activityRecorder = self.activityRecorder
+        let channel = try await ServerBootstrap(group: activityRecorder.eventLoop)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(ApprovalControlHandler())
+                channel.pipeline.addHandler(ApprovalControlHandler(activityRecorder: activityRecorder))
             }
             .bind(unixDomainSocketPath: controlSocketURL.path, cleanupExistingSocketFile: true)
             .get()
@@ -355,6 +365,11 @@ private final class ApprovalControlHandler: ChannelInboundHandler {
 
     private var buffer: ByteBuffer?
     private var handled = false
+    private let activityRecorder: ProxyActivityRecorder
+
+    init(activityRecorder: ProxyActivityRecorder) {
+        self.activityRecorder = activityRecorder
+    }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         guard !handled else {
@@ -384,6 +399,10 @@ private final class ApprovalControlHandler: ChannelInboundHandler {
             context.close(promise: nil)
             return
         }
+
+        // Count every decoded approval attempt exactly once, before waiting
+        // for a decision (including auto-approvals and denials).
+        activityRecorder.recordAttempt()
 
         let approvalPromise = context.eventLoop.makePromise(of: ProxyApprovalResponse.self)
         approvalPromise.futureResult.whenComplete { result in
@@ -452,11 +471,11 @@ private final class TimeVsockListenerDelegate: NSObject, VZVirtioSocketListenerD
 
 private final class VsockUnixBridgeDelegate: NSObject, VZVirtioSocketListenerDelegate {
     private let unixSocketPath: String
-    private let eventLoopGroup: EventLoopGroup
+    private let activityRecorder: ProxyActivityRecorder
 
-    init(unixSocketPath: String, eventLoopGroup: EventLoopGroup) {
+    init(unixSocketPath: String, activityRecorder: ProxyActivityRecorder) {
         self.unixSocketPath = unixSocketPath
-        self.eventLoopGroup = eventLoopGroup
+        self.activityRecorder = activityRecorder
     }
 
     func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection, from socketDevice: VZVirtioSocketDevice) -> Bool {
@@ -465,15 +484,20 @@ private final class VsockUnixBridgeDelegate: NSObject, VZVirtioSocketListenerDel
             return false
         }
 
-        ClientBootstrap(group: eventLoopGroup)
+        ClientBootstrap(group: activityRecorder.eventLoop)
             .channelOption(ChannelOptions.autoRead, value: false)
             .withConnectedSocket(nioOwnedFD)
-            .flatMap { [unixSocketPath] vsockChannel in
+            .flatMap { [unixSocketPath, activityRecorder] vsockChannel in
                 ClientBootstrap(group: vsockChannel.eventLoop)
                     .channelOption(ChannelOptions.autoRead, value: false)
                     .connect(unixDomainSocketPath: unixSocketPath)
                     .flatMap { proxyChannel in
-                        bridge(vsockChannel, proxyChannel)
+                        bridge(
+                            vsockChannel,
+                            proxyChannel,
+                            recordBytesToSecond: { activityRecorder.recordUpload(bytes: $0) },
+                            recordBytesToFirst: { activityRecorder.recordDownload(bytes: $0) }
+                        )
                     }
                     .flatMapError { error in
                         vsockChannel.close(promise: nil)

@@ -5,9 +5,11 @@ final class ForwardingHandler: ChannelInboundHandler {
     typealias OutboundOut = ByteBuffer
 
     private weak var peer: Channel?
+    private let recordBytes: ((Int) -> Void)?
 
-    init(peer: Channel) {
+    init(peer: Channel, recordBytes: ((Int) -> Void)? = nil) {
         self.peer = peer
+        self.recordBytes = recordBytes
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -17,6 +19,7 @@ final class ForwardingHandler: ChannelInboundHandler {
         }
 
         let buffer = unwrapInboundIn(data)
+        recordBytes?(buffer.readableBytes)
         peer.write(buffer, promise: nil)
 
         if !peer.isWritable {
@@ -56,12 +59,18 @@ final class ForwardingHandler: ChannelInboundHandler {
     }
 }
 
-func bridge(_ first: Channel, _ second: Channel, initialBytesToSecond initialBytes: [UInt8] = []) -> EventLoopFuture<Void> {
+func bridge(
+    _ first: Channel,
+    _ second: Channel,
+    initialBytesToSecond initialBytes: [UInt8] = [],
+    recordBytesToSecond: ((Int) -> Void)? = nil,
+    recordBytesToFirst: ((Int) -> Void)? = nil
+) -> EventLoopFuture<Void> {
     first.setOption(ChannelOptions.allowRemoteHalfClosure, value: true).and(
         second.setOption(ChannelOptions.allowRemoteHalfClosure, value: true)
     ).flatMap { _ in
-        first.pipeline.addHandler(ForwardingHandler(peer: second)).and(
-            second.pipeline.addHandler(ForwardingHandler(peer: first))
+        first.pipeline.addHandler(ForwardingHandler(peer: second, recordBytes: recordBytesToSecond)).and(
+            second.pipeline.addHandler(ForwardingHandler(peer: first, recordBytes: recordBytesToFirst))
         )
     }.flatMap { _ in
         writeInitialBytes(initialBytes, to: second)
