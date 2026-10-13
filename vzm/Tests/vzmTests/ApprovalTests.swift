@@ -951,6 +951,34 @@ final class ApprovalTests: XCTestCase {
         XCTAssertEqual(presentations.count, 4)
     }
 
+    func testAzureMavenChecksumSidecarsRequireSupportedArtifacts() {
+        let engine = AzureDevOpsMavenApprovalEngine()
+        let r = azureMavenRequest()
+        engine.onEngineApproved(r)
+        let prefix = "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/"
+        for artifact in ["lib-1.0.pom", "lib-1.0.module", "lib-1.0.jar", "lib-1.0-sources.jar"] {
+            for checksum in ["sha1", "md5", "sha256", "sha512"] {
+                for method in ["GET", "HEAD"] {
+                    var valid = r
+                    valid.url = prefix + artifact + "." + checksum
+                    valid.method = method
+                    XCTAssertTrue(engine.isEligibleForAuto(valid), valid.url)
+                    if case .approved = engine.handle(valid) {} else { XCTFail(valid.url) }
+                }
+            }
+        }
+        for filename in [
+            "other-1.0.pom.sha1", "lib-2.0.jar.sha1", "lib-1.0.txt.sha1",
+            "lib-1.0.sha1", "lib-1.0.pom.sha1.sha1", "lib-1.0.pom.sha256.sha1",
+            "lib-1.0.jar.asc", "lib-1.0.jar.sha999",
+        ] {
+            var invalid = r
+            invalid.url = prefix + filename
+            XCTAssertFalse(engine.isEligibleForAuto(invalid), invalid.url)
+            if case .unknown = engine.handle(invalid) {} else { XCTFail(invalid.url) }
+        }
+    }
+
     func testAzureMavenAutoValidatesPatternHeadersAndSecretNames() {
         let engine = AzureDevOpsMavenApprovalEngine()
         var readOnly = azureMavenRequest()
@@ -991,7 +1019,7 @@ final class ApprovalTests: XCTestCase {
             r.url + "?extra=1", r.url + "#fragment",
             "pkgs.dev.azure.com/org/_packaging/feed/npm/v1/org/example/lib/1.0/lib-1.0.jar",
             "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/other-1.0.jar",
-            "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar.sha256",
+            "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar.sha999",
         ] {
             invalid = r
             invalid.url = url

@@ -121,6 +121,11 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
     }
 
     private static func matchesArtifactFilename(_ filename: String, artifact: String, version: String) -> Bool {
+        // Checksum sidecars must still name a supported artifact, not an arbitrary file.
+        var filename = filename
+        if let checksum = ["sha1", "md5", "sha256", "sha512"].first(where: { filename.hasSuffix(".\($0)") }) {
+            filename = String(filename.dropLast(checksum.count + 1))
+        }
         guard let dot = filename.lastIndex(of: ".") else {
             return false
         }
