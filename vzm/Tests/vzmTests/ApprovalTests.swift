@@ -166,6 +166,25 @@ final class ApprovalTests: XCTestCase {
         }
     }
 
+    func testAcceptEncodingQualityValues() {
+        let r = request()
+        for value in [
+            "zstd;q=1.0, gzip;q=0.8, deflate;q=0.5",
+            "gzip", "BR; Q=1.000, gzip ; q = 0.8", "gzip;q=0, deflate",
+        ] {
+            let header = ProxyApprovalHeader(name: "Accept-Encoding", value: value)
+            XCTAssertTrue(ApprovalHeaderMasker.isSafe(header, in: r), value)
+        }
+        for value in [
+            "", "gzip,", "gzip,,br", "custom;q=0.8", "gzip;custom=value",
+            "gzip;q=0.1234", "gzip;q=secret", "gzip;q=0.8;custom=value",
+            "gzip;q=0.8;q=0.9", "gzip;q=0.8=extra", "gzip;",
+        ] {
+            let header = ProxyApprovalHeader(name: "Accept-Encoding", value: value)
+            XCTAssertFalse(ApprovalHeaderMasker.isSafe(header, in: r), value)
+        }
+    }
+
     func testCommonAcceptMediaTypesAreMasked() {
         let types = [
             "text/plain", "application/octet-stream", "application/xhtml+xml", "application/xml", "text/xml",
@@ -491,6 +510,60 @@ final class ApprovalTests: XCTestCase {
         }
         let presentations = await prompts.presentations
         XCTAssertTrue(presentations.isEmpty)
+    }
+
+    func testDockerHubLayerDownloadHeadersInAuto() async throws {
+        let service = try service(engines: [DockerHubApprovalEngine()])
+        mode.select(.auto)
+        let digest = "6dddcbf9098d2a4da10b4e38e4005483d63c3a2607dc0c465edd0f8499bb6cf3"
+        let blob = "registry-1.docker.io/v2/library/mysql/blobs/sha256:\(digest)"
+        for url in [
+            blob,
+            "production.cloudfront.docker.com/registry-v2/docker/registry/v2/blobs/sha256/6d/\(digest)/data?Expires=1791820895&Signature=example~__&Key-Pair-Id=K2C9XPB6FLAKUF",
+        ] {
+            var r = request(url)
+            r.headers = [
+                ProxyApprovalHeader(name: "Accept-Encoding", value: "zstd;q=1.0, gzip;q=0.8, deflate;q=0.5"),
+                ProxyApprovalHeader(name: "Accept", value: "application/vnd.oci.image.layer.v1.tar+gzip, */*"),
+                ProxyApprovalHeader(name: "Baggage", value: "trigger=api"),
+                ProxyApprovalHeader(name: "Referer", value: "https://\(blob)"),
+            ]
+            await assertDecision(service, r, true)
+        }
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+    }
+
+    func testDockerHubLayerHeadersRemainNarrow() {
+        let engine = DockerHubApprovalEngine()
+        let digest = String(repeating: "a", count: 64)
+        var r = request("registry-1.docker.io/v2/library/mysql/blobs/sha256:\(digest)")
+        for url in [
+            r.url,
+            "registry-1.docker.io/v2/library/mysql/manifests/latest",
+            "registry-1.docker.io/v2/library/mysql/referrers/sha256:\(digest)",
+            "auth.docker.io/token?scope=repository%3Alibrary%2Fmysql%3Apull&service=registry.docker.io",
+            "production.cloudfront.docker.com/registry-v2/docker/registry/v2/blobs/sha256/aa/\(digest)/data?Expires=1791820895&Signature=example~__&Key-Pair-Id=K2C9XPB6FLAKUF",
+        ] {
+            r.headers = [ProxyApprovalHeader(name: "Referer", value: "https://\(url)")]
+            XCTAssertTrue(engine.isEligibleForAuto(r), url)
+        }
+        for (name, value) in [
+            ("Baggage", "trigger=other"),
+            ("Baggage", "trigger=api,secret=value"),
+            ("Referer", "http://\(r.url)"),
+            ("Referer", "https://example.com/v2/library/mysql/blobs/sha256:\(digest)"),
+            ("Referer", "https://\(r.url)?secret=value"),
+            ("Referer", "https://\(r.url)#secret"),
+            ("Referer", "https://registry-1.docker.io/v2/library/mysql/blobs/uploads/"),
+            ("Referer", "https://registry-1.docker.io/v2/library/mysql/blobs/sha256:invalid"),
+        ] {
+            r.headers = [ProxyApprovalHeader(name: name, value: value)]
+            XCTAssertFalse(engine.isEligibleForAuto(r), value)
+        }
+        r = request("example.com/arbitrary")
+        r.headers = [ProxyApprovalHeader(name: "Baggage", value: "trigger=api")]
+        XCTAssertEqual(engine.headersForApproval(r), r.headers)
     }
 
     func testDockerHubHeaderConsentAndTokenRotation() {

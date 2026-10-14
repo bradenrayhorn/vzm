@@ -18,6 +18,7 @@ final class DockerHubApprovalEngine: PatternApprovalEngine {
         "application/vnd.docker.distribution.manifest.list.v2+json",
         "application/vnd.oci.image.manifest.v1+json",
         "application/vnd.oci.image.index.v1+json",
+        "application/vnd.oci.image.layer.v1.tar+gzip",
     ]
 
     init() {
@@ -44,6 +45,15 @@ final class DockerHubApprovalEngine: PatternApprovalEngine {
             if name == "authorization" {
                 // Credentials referenced through vzm secrets are excluded by matches().
                 return false
+            }
+            if name == "baggage" {
+                return header.value.trimmingCharacters(in: .whitespacesAndNewlines) != "trigger=api"
+            }
+            if name == "referer" {
+                let value = header.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard value.hasPrefix("https://") else { return true }
+                let url = String(value.dropFirst("https://".count))
+                return !isDockerHubPullURL(url)
             }
             if name == "accept" {
                 let types = header.value.split(separator: ",", omittingEmptySubsequences: false)

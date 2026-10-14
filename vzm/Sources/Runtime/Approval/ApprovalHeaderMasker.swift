@@ -48,10 +48,14 @@ enum ApprovalHeaderMasker {
     }
 
     private static func isSafeAcceptItem(_ item: String) -> Bool {
+        isSafeWeightedItem(item, allowed: safeAccept)
+    }
+
+    private static func isSafeWeightedItem(_ item: String, allowed: Set<String>) -> Bool {
         let parts = item.split(separator: ";", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-        guard let mediaType = parts.first, safeAccept.contains(mediaType), parts.count <= 2 else { return false }
+        guard let token = parts.first, allowed.contains(token), parts.count <= 2 else { return false }
         if parts.count == 1 { return true }
 
         let parameter = parts[1].split(separator: "=", omittingEmptySubsequences: false)
@@ -73,7 +77,7 @@ enum ApprovalHeaderMasker {
         case "accept-encoding":
             let encodings = value.split(separator: ",", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            return !encodings.isEmpty && encodings.allSatisfy { safeEncodings.contains($0) }
+            return !encodings.isEmpty && encodings.allSatisfy { isSafeWeightedItem($0, allowed: safeEncodings) }
         case "accept":
             let accepts = value.split(separator: ",", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
