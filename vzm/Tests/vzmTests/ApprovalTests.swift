@@ -534,6 +534,26 @@ final class ApprovalTests: XCTestCase {
         XCTAssertTrue(presentations.isEmpty)
     }
 
+    func testDockerHubConfigAndAttestationBlobHeadersInAuto() async throws {
+        let service = try service(engines: [DockerHubApprovalEngine()])
+        mode.select(.auto)
+        let digest = String(repeating: "a", count: 64)
+        for mediaType in [
+            "application/vnd.oci.image.config.v1+json",
+            "application/vnd.in-toto+json",
+            "application/vnd.docker.container.image.v1+json",
+            "application/vnd.docker.image.rootfs.diff.tar.gzip",
+        ] {
+            var r = request("registry-1.docker.io/v2/library/alpine/blobs/sha256:\(digest)")
+            r.headers = [
+                ProxyApprovalHeader(name: "Accept", value: "\(mediaType), */*"),
+            ]
+            await assertDecision(service, r, true)
+        }
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+    }
+
     func testDockerHubLayerHeadersRemainNarrow() {
         let engine = DockerHubApprovalEngine()
         let digest = String(repeating: "a", count: 64)
@@ -602,7 +622,7 @@ final class ApprovalTests: XCTestCase {
             XCTAssertTrue(engine.isEligibleForAuto(r))
             r.headers.removeLast()
         }
-        for value in ["", "text/custom", "application/vnd.oci.image.index.v1+json,", "application/vnd.oci.image.index.v1+json; custom=value"] {
+        for value in ["", "text/custom", "application/vnd.oci.image.index.v1+json,", "application/vnd.oci.image.index.v1+json; custom=value", "application/vnd.in-toto+json, text/custom", "application/vnd.oci.image.config.v1+json; custom=value"] {
             var invalid = r
             invalid.headers.append(ProxyApprovalHeader(name: "Accept", value: value))
             XCTAssertFalse(engine.isEligibleForAuto(invalid))

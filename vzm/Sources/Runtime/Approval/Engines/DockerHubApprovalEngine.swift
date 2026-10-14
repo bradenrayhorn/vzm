@@ -19,6 +19,10 @@ final class DockerHubApprovalEngine: PatternApprovalEngine {
         "application/vnd.oci.image.manifest.v1+json",
         "application/vnd.oci.image.index.v1+json",
         "application/vnd.oci.image.layer.v1.tar+gzip",
+        "application/vnd.oci.image.config.v1+json",
+        "application/vnd.in-toto+json",
+        "application/vnd.docker.container.image.v1+json",
+        "application/vnd.docker.image.rootfs.diff.tar.gzip",
     ]
 
     init() {
