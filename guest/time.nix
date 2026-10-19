@@ -18,7 +18,14 @@
         sleep 0.2
       done
 
-      date -u -s "@$epoch"
+      guest_epoch=$(date +%s)
+      offset=$((epoch - guest_epoch))
+
+      # Only correct large offsets >2 seconds
+      if (( offset > 2 || offset < -2 )); then
+        echo "vzm-time-sync: correcting clock by approximately $offset seconds"
+        date -u -s "@$epoch"
+      fi
     '';
   };
 
