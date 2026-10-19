@@ -69,6 +69,10 @@
   boot.kernelModules = [ ];
   boot.extraModulePackages = [ ];
 
+  # Log kernel issues
+  boot.kernel.sysctl."debug.exception-trace" = 1;
+  boot.consoleLogLevel = lib.mkDefault 7;
+
   nixpkgs.hostPlatform = lib.mkDefault "aarch64-linux";
 
   networking.useDHCP = false;

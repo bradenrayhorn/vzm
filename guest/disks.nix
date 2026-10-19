@@ -182,7 +182,7 @@ in
             ${pkgs.coreutils}/bin/mkdir -p "$mount_path"
 
             if ! ${pkgs.gnugrep}/bin/grep -Fqs " $mount_path $filesystem " /proc/mounts; then
-              ${pkgs.util-linux}/bin/mount -t "$filesystem" "$device" "$mount_path"
+              ${pkgs.util-linux}/bin/mount -t "$filesystem" -o errors=remount-ro "$device" "$mount_path"
             fi
 
             ${pkgs.coreutils}/bin/chown braden:braden "$mount_path"
