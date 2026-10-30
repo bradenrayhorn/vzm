@@ -825,15 +825,34 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 			break
 		}
 
-		stripHopByHopHeaders(resp.Header)
 		responseWriter := &countingWriter{writer: tlsConn}
-		if err := resp.Write(responseWriter); err != nil {
+		if err := writeProxyResponse(responseWriter, resp); err != nil {
 			log.Printf("Error writing response for %s %s after %d bytes (content-length %d): %v", innerReq.Method, innerReq.URL.String(), responseWriter.bytes, resp.ContentLength, err)
 			resp.Body.Close()
 			break
 		}
 		resp.Body.Close()
+		if resp.Close {
+			break
+		}
 	}
+}
+
+func writeProxyResponse(w io.Writer, resp *http.Response) error {
+	stripHopByHopHeaders(resp.Header)
+
+	// Transport can transparently decompress a length-delimited gzip response,
+	// removing Content-Length without adding Transfer-Encoding. Response.Write
+	// does not choose chunked framing for us (and treats Uncompressed specially).
+	// Without explicit framing, clients wait for EOF while our CONNECT loop
+	// waits for their next request. Reframe unknown-length persistent bodies
+	// as chunks, preserving incremental delivery for SSE/MCP responses.
+	bodyAllowed := resp.StatusCode >= 200 && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified
+	isHEAD := resp.Request != nil && resp.Request.Method == http.MethodHead
+	if resp.ContentLength < 0 && !resp.Close && resp.ProtoAtLeast(1, 1) && bodyAllowed && !isHEAD {
+		resp.TransferEncoding = []string{"chunked"}
+	}
+	return resp.Write(w)
 }
 
 func isWebSocketUpgradeRequest(r *http.Request) bool {
