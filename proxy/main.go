@@ -174,6 +174,10 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 }
 
 func askForApproval(request approvalRequest) approvalResponse {
+	return askForApprovalContext(shutdownCtx, request)
+}
+
+func askForApprovalContext(ctx context.Context, request approvalRequest) approvalResponse {
 	if controlUnixPath == "" {
 		log.Printf("approval denied: no control socket configured for %s %s %s %s", request.Type, request.Method, request.Domain, request.URL)
 		return approvalResponse{Approved: false}
@@ -186,12 +190,14 @@ func askForApproval(request approvalRequest) approvalResponse {
 		request.Secrets = []string{}
 	}
 
-	conn, err := net.Dial("unix", controlUnixPath)
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", controlUnixPath)
 	if err != nil {
 		log.Printf("approval denied: connect control socket: %v", err)
 		return approvalResponse{Approved: false}
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		log.Printf("approval denied: write request: %v", err)
@@ -222,6 +228,7 @@ func main() {
 	listenTCPAddr := flag.String("listen-tcp", ":26604", "TCP address for the HTTPS proxy listener when --listen-unix is not set")
 	caCertPath := flag.String("ca-cert", "", "Path to write the MITM CA certificate PEM")
 	parentPID := flag.Int("parent-pid", 0, "PID of the parent vzm process; exit if it disappears")
+	networkFD := flag.Int("network-fd", -1, "Connected Unix datagram fd carrying private guest Ethernet frames")
 	flag.StringVar(&controlUnixPath, "control-unix", "", "Unix domain socket path for approval requests")
 	flag.Parse()
 
@@ -244,6 +251,20 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("wrote MITM CA PEM to %s", pemPath)
+
+	if *networkFD >= 0 {
+		network, err := networkFromFD(*networkFD)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer network.Close()
+		go func() {
+			if err := network.Run(shutdownCtx); err != nil {
+				log.Printf("private network: %v", err)
+			}
+			stop() // Never fall back to another networking path.
+		}()
+	}
 
 	listener, err := listen(*listenUnixPath, *listenTCPAddr)
 	if err != nil {
@@ -751,91 +772,154 @@ func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
 	}
 	defer tlsConn.Close()
 
-	bufReader := bufio.NewReader(tlsConn)
+	serveHTTPStream(tlsConn, targetHost, targetPort, "https")
+}
+
+// Shared by explicit CONNECT and private-NIC connections: identical request
+// approvals, secret substitution, streaming, redirects, and WebSocket policy.
+func serveHTTPStream(conn net.Conn, targetHost, targetPort, scheme string) {
+	serveHTTPStreamContext(shutdownCtx, conn, targetHost, targetPort, scheme)
+}
+
+func serveHTTPStreamContext(ctx context.Context, conn net.Conn, targetHost, targetPort, scheme string) {
+	headerReader := &httpHeaderReader{Reader: conn}
+	bufReader := bufio.NewReader(headerReader)
 	for {
+		headerReader.remaining = 64*1024 - bufReader.Buffered()
+		headerReader.limited = true
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 		innerReq, err := http.ReadRequest(bufReader)
+		_ = conn.SetReadDeadline(time.Time{})
+		headerReader.limited = false
 		if err != nil {
 			if err != io.EOF {
-				log.Println("Error reading inner request:", err)
+				log.Println("Error reading HTTP request:", err)
 			}
-			break
+			return
 		}
-
-		if !hostHeaderMatches(innerReq.Host, targetHost, targetPort) {
-			log.Printf("Domain fronting detected! CONNECT: %s, Host: %s", net.JoinHostPort(targetHost, targetPort), innerReq.Host)
-			break
-		}
-
-		secretNames, err := findRequestSecrets(innerReq)
-		if err != nil {
-			log.Println("Error scanning request for secrets:", err)
-			tlsConn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-			break
-		}
-
-		approvalType := "REQUEST"
-		if isWebSocketUpgradeRequest(innerReq) {
-			approvalType = "WEBSOCKET"
-		}
-
-		reqURL, _ := approvalDisplayBytes([]byte(targetHost + innerReq.RequestURI))
-		approval := askForApproval(approvalRequest{
-			Type:    approvalType,
-			Domain:  targetHost,
-			Method:  innerReq.Method,
-			URL:     reqURL,
-			Headers: approvalHeadersForRequest(innerReq),
-			Body:    approvalBodyForRequest(innerReq),
-			Secrets: secretNames,
-		})
-		if !approval.Approved {
-			tlsConn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
-			break
-		}
-		if err := applySecretSubstitutions(innerReq, approval.Substitutions); err != nil {
-			log.Println("Error substituting request secrets:", err)
-			tlsConn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-			break
-		}
-
-		if approvalType == "WEBSOCKET" {
-			if err := proxyWebSocketConnection(tlsConn, bufReader, innerReq, targetHost, targetPort); err != nil {
-				log.Println("Error proxying websocket connection:", err)
-			}
-			break
-		}
-
-		innerReq.URL.Scheme = "https"
-		innerReq.URL.Host = innerReq.Host
-		innerReq.RequestURI = ""
-		stripHopByHopHeaders(innerReq.Header)
-		innerReq.Close = false
-
-		resp, err := outboundClient.Do(innerReq)
-		if err != nil {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-			log.Println("Error executing upstream request:", err)
-			if errors.Is(err, errBlockedDestination) {
-				tlsConn.Write([]byte("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-			} else {
-				tlsConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-			}
-			break
-		}
-
-		responseWriter := &countingWriter{writer: tlsConn}
-		if err := writeProxyResponse(responseWriter, resp); err != nil {
-			log.Printf("Error writing response for %s %s after %d bytes (content-length %d): %v", innerReq.Method, innerReq.URL.String(), responseWriter.bytes, resp.ContentLength, err)
-			resp.Body.Close()
-			break
-		}
-		resp.Body.Close()
-		if resp.Close {
-			break
+		innerReq = innerReq.WithContext(ctx)
+		if !serveHTTPRequest(conn, bufReader, innerReq, targetHost, targetPort, scheme) {
+			return
 		}
 	}
+}
+
+type httpHeaderReader struct {
+	io.Reader
+	remaining int
+	limited   bool
+}
+
+func (r *httpHeaderReader) Read(p []byte) (int, error) {
+	if r.limited {
+		if r.remaining <= 0 {
+			return 0, fmt.Errorf("HTTP headers exceed limit")
+		}
+		if len(p) > r.remaining {
+			p = p[:r.remaining]
+		}
+	}
+	n, err := r.Reader.Read(p)
+	if r.limited {
+		r.remaining -= n
+	}
+	return n, err
+}
+
+func serveHTTPRequest(conn net.Conn, bufReader *bufio.Reader, innerReq *http.Request, targetHost, targetPort, scheme string) (keepAlive bool) {
+	defer func() {
+		// A rejected request may have an unread body. Close the connection
+		// before Body.Close so it cannot block draining an adversarial peer.
+		if !keepAlive {
+			_ = conn.Close()
+		}
+		_ = innerReq.Body.Close()
+	}()
+	// Never allow CONNECT or absolute-form requests to switch this stream's authority.
+	if innerReq.Method == http.MethodConnect || (innerReq.URL.IsAbs() &&
+		(innerReq.URL.Scheme != scheme || !hostHeaderMatches(innerReq.URL.Host, targetHost, targetPort))) {
+		_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		return false
+	}
+	if !hostHeaderMatches(innerReq.Host, targetHost, targetPort) {
+		log.Printf("Domain fronting detected! CONNECT: %s, Host: %s", net.JoinHostPort(targetHost, targetPort), innerReq.Host)
+		return false
+	}
+
+	secretNames, err := findRequestSecrets(innerReq)
+	if err != nil {
+		log.Println("Error scanning request for secrets:", err)
+		conn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+		return false
+	}
+
+	// The old explicit proxy only admitted HTTPS CONNECTs. Supporting ordinary
+	// HTTP must not silently send host-held secrets over an unencrypted link.
+	if scheme != "https" && len(secretNames) != 0 {
+		_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		return false
+	}
+
+	approvalType := "REQUEST"
+	if isWebSocketUpgradeRequest(innerReq) {
+		approvalType = "WEBSOCKET"
+	}
+
+	reqURL, _ := approvalDisplayBytes([]byte(targetHost + innerReq.RequestURI))
+	approval := askForApprovalContext(innerReq.Context(), approvalRequest{
+		Type:    approvalType,
+		Domain:  targetHost,
+		Method:  innerReq.Method,
+		URL:     reqURL,
+		Headers: approvalHeadersForRequest(innerReq),
+		Body:    approvalBodyForRequest(innerReq),
+		Secrets: secretNames,
+	})
+	if !approval.Approved {
+		conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
+		return false
+	}
+	if err := applySecretSubstitutions(innerReq, approval.Substitutions); err != nil {
+		log.Println("Error substituting request secrets:", err)
+		conn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+		return false
+	}
+
+	if approvalType == "WEBSOCKET" {
+		if err := proxyWebSocketConnection(conn, bufReader, innerReq, targetHost, targetPort, scheme); err != nil {
+			log.Println("Error proxying websocket connection:", err)
+		}
+		return false
+	}
+
+	innerReq.URL.Scheme = scheme
+	innerReq.URL.Host = innerReq.Host
+	innerReq.RequestURI = ""
+	stripHopByHopHeaders(innerReq.Header)
+	innerReq.Close = false
+
+	resp, err := outboundClient.Do(innerReq)
+	if err != nil {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+		log.Println("Error executing upstream request:", err)
+		if errors.Is(err, errBlockedDestination) {
+			conn.Write([]byte("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+		} else {
+			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+		}
+		return false
+	}
+
+	responseWriter := &countingWriter{writer: conn}
+	if err := writeProxyResponse(responseWriter, resp); err != nil {
+		log.Printf("Error writing response for %s %s after %d bytes (content-length %d): %v", innerReq.Method, innerReq.URL.String(), responseWriter.bytes, resp.ContentLength, err)
+		resp.Body.Close()
+		return false
+	}
+	resp.Body.Close()
+	return !resp.Close
 }
 
 func writeProxyResponse(w io.Writer, resp *http.Response) error {
@@ -865,35 +949,37 @@ func isWebSocketUpgradeRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
 }
 
-func proxyWebSocketConnection(clientConn net.Conn, clientReader *bufio.Reader, innerReq *http.Request, targetHost, targetPort string) error {
-	upstreamConn, err := dialPublicTCPContext(shutdownCtx, "tcp", net.JoinHostPort(targetHost, targetPort))
+func proxyWebSocketConnection(clientConn net.Conn, clientReader *bufio.Reader, innerReq *http.Request, targetHost, targetPort, scheme string) error {
+	upstreamConn, err := dialPublicTCPContext(innerReq.Context(), "tcp", net.JoinHostPort(targetHost, targetPort))
 	if err != nil {
 		return err
 	}
 	defer upstreamConn.Close()
+	rawConn := upstreamConn
+	stop := context.AfterFunc(innerReq.Context(), func() { rawConn.Close() })
+	defer stop()
 
-	upstreamTLSConn := tls.Client(upstreamConn, &tls.Config{
-		ServerName: targetHost,
-		NextProtos: []string{"http/1.1"},
-	})
-	defer upstreamTLSConn.Close()
-
-	if err := upstreamTLSConn.Handshake(); err != nil {
-		return err
+	if scheme == "https" {
+		tlsConn := tls.Client(upstreamConn, &tls.Config{ServerName: targetHost, NextProtos: []string{"http/1.1"}})
+		if err := tlsConn.HandshakeContext(innerReq.Context()); err != nil {
+			return err
+		}
+		upstreamConn = tlsConn
+		defer tlsConn.Close()
 	}
 
-	innerReq.URL.Scheme = "https"
+	innerReq.URL.Scheme = scheme
 	innerReq.URL.Host = innerReq.Host
 	innerReq.RequestURI = ""
 	innerReq.Close = false
 	innerReq.Header.Del("Proxy-Connection")
 	innerReq.Header.Del("Proxy-Authorization")
 
-	if err := innerReq.Write(upstreamTLSConn); err != nil {
+	if err := innerReq.Write(upstreamConn); err != nil {
 		return err
 	}
 
-	upstreamReader := bufio.NewReader(upstreamTLSConn)
+	upstreamReader := bufio.NewReader(upstreamConn)
 	resp, err := http.ReadResponse(upstreamReader, innerReq)
 	if err != nil {
 		return err
@@ -907,7 +993,7 @@ func proxyWebSocketConnection(clientConn net.Conn, clientReader *bufio.Reader, i
 		return nil
 	}
 
-	return tunnelConnections(clientConn, clientReader, upstreamTLSConn, upstreamReader)
+	return tunnelConnections(clientConn, clientReader, upstreamConn, upstreamReader)
 }
 
 func tunnelConnections(clientConn net.Conn, clientReader *bufio.Reader, upstreamConn net.Conn, upstreamReader *bufio.Reader) error {

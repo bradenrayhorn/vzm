@@ -97,6 +97,10 @@ jobs:
         with:
           go-version-file: proxy/go.mod
 
+      - name: Test proxy
+        working-directory: proxy
+        run: go test -race ./...
+
       - name: Build proxy
         working-directory: proxy
         env:

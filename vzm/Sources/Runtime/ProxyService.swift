@@ -32,6 +32,7 @@ final class ProxyService {
     private static let gitVsockPort: UInt32 = 4022
 
     private let vmName: String
+    private let network: PrivateNetwork
     private let proxyExecutableURL: URL
     private let runDirectoryURL: URL
     private let proxySocketURL: URL
@@ -60,8 +61,9 @@ final class ProxyService {
     private var timeListener: VZVirtioSocketListener?
     private var timeListenerDelegate: TimeVsockListenerDelegate?
 
-    init(vmName: String) throws {
+    init(vmName: String, network: PrivateNetwork) throws {
         self.vmName = vmName
+        self.network = network
         self.proxyExecutableURL = try Self.locateProxyExecutable()
         self.runDirectoryURL = try Self.createRunDirectory()
         self.proxySocketURL = runDirectoryURL.appendingPathComponent("p.sock")
@@ -87,14 +89,19 @@ final class ProxyService {
             "--ca-cert", caCertificateURL.path,
             "--control-unix", controlSocketURL.path,
             "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
+            "--network-fd", "0",
         ]
         process.currentDirectoryURL = runDirectoryURL
         process.environment = ProcessInfo.processInfo.environment
+        process.standardInput = network.proxyHandle
         process.standardOutput = FileHandle.standardError
         process.standardError = FileHandle.standardError
 
         self.process = process
         try process.run()
+        // Foundation duplicates this socket onto the child's fd 0. Retaining
+        // a parent copy would hide peer shutdown and leak the transport.
+        try network.proxyHandle.close()
         try await waitForReady()
     }
 
@@ -281,6 +288,12 @@ final class ProxyService {
     }
 }
 
+struct ProxyNetworkActivity: Decodable {
+    let type: String
+    let uploadBytes: Int
+    let downloadBytes: Int
+}
+
 struct ProxyApprovalRequest: Codable, Sendable {
     var id: String
     var type: String
@@ -394,8 +407,18 @@ private final class ApprovalControlHandler: ChannelInboundHandler {
         self.buffer = buffer
         handled = true
 
-        guard let requestData = line.data(using: .utf8),
-              let request = try? JSONDecoder().decode(ProxyApprovalRequest.self, from: requestData) else {
+        guard let requestData = line.data(using: .utf8) else {
+            context.close(promise: nil)
+            return
+        }
+        if let activity = try? JSONDecoder().decode(ProxyNetworkActivity.self, from: requestData),
+           activity.type == "NETWORK_ACTIVITY" {
+            activityRecorder.recordUpload(bytes: max(0, activity.uploadBytes))
+            activityRecorder.recordDownload(bytes: max(0, activity.downloadBytes))
+            context.close(promise: nil)
+            return
+        }
+        guard let request = try? JSONDecoder().decode(ProxyApprovalRequest.self, from: requestData) else {
             context.close(promise: nil)
             return
         }

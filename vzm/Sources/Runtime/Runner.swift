@@ -54,6 +54,7 @@ class Runner {
     let diskLease: FileLockLease
     let machine: VZVirtualMachine
     let stopDelegate: VMStopDelegate
+    let privateNetwork: PrivateNetwork
 
     private var interruptCount = 0
 
@@ -69,6 +70,8 @@ class Runner {
         self.diskBundles = try vmBundle.manifest.disks.map { try diskStore.loadDisk(named: $0.name) }
         self.diskLease = try diskStore.acquireLease(for: diskBundles)
 
+        self.privateNetwork = try PrivateNetwork()
+
         let createdRootScratchDisk = try TemporaryDiskImage.create(
             prefix: "vzm-root-\(vmBundle.manifest.name)",
             imageFileName: VMRootScratchDisk.imageFileName,
@@ -81,7 +84,8 @@ class Runner {
                 rootBundle: rootBundle,
                 rootScratchDiskURL: createdRootScratchDisk.imageURL,
                 diskBundles: diskBundles,
-                resources: resources
+                resources: resources,
+                network: privateNetwork
             )
             self.rootScratchDisk = createdRootScratchDisk
             machine = VZVirtualMachine(configuration: configuration)
@@ -101,7 +105,7 @@ class Runner {
     func run() async throws {
         defer { rootScratchDisk.remove() }
 
-        let proxyService = try ProxyService(vmName: vmBundle.manifest.name)
+        let proxyService = try ProxyService(vmName: vmBundle.manifest.name, network: privateNetwork)
         var portExposureService: PortExposureService?
         var notificationService: NotificationService?
 
@@ -241,7 +245,7 @@ struct VZConfiguration {
     static let defaultCPUCount = 4
     static let defaultMemorySizeBytes: UInt64 = 8 * VMResources.gibibyte
 
-    func build(vmBundle: StoredVM, rootBundle: RootBundle, rootScratchDiskURL: URL, diskBundles: [DiskBundle], resources: VMResources) throws -> VZVirtualMachineConfiguration {
+    func build(vmBundle: StoredVM, rootBundle: RootBundle, rootScratchDiskURL: URL, diskBundles: [DiskBundle], resources: VMResources, network: PrivateNetwork) throws -> VZVirtualMachineConfiguration {
         let configuration = VZVirtualMachineConfiguration()
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
@@ -271,7 +275,7 @@ struct VZConfiguration {
         configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         configuration.cpuCount = resources.cpuCount
         configuration.memorySize = resources.memorySizeBytes
-        configuration.networkDevices = []
+        configuration.networkDevices = [network.deviceConfiguration()]
         configuration.directorySharingDevices = vmBundle.manifest.shares.map { share in
             let sharedDirectory = VZSharedDirectory(url: URL(fileURLWithPath: share.hostPath), readOnly: false)
             let directoryShare = VZSingleDirectoryShare(directory: sharedDirectory)

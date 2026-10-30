@@ -3,6 +3,7 @@
   imports = [
     (modulesPath + "/profiles/qemu-guest.nix")
     ./proxy.nix
+    ./network.nix
     ./git-proxy.nix
     ./port-expose.nix
     ./time.nix
@@ -78,7 +79,7 @@
   networking.useDHCP = false;
   networking.hostName = "vzm-guest";
   networking.interfaces = { };
-  networking.firewall.enable = lib.mkForce false; # there is no network mounted
+  networking.firewall.enable = lib.mkForce false; # egress policy is enforced on the host
 
   environment.systemPackages = with pkgs; [
     vim

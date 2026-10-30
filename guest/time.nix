@@ -6,7 +6,6 @@
     before = [
       "nix-daemon.service"
       "vzm-mitm-ca.service"
-      "vzm-https-proxy.service"
     ];
     path = [ pkgs.coreutils pkgs.gnugrep pkgs.socat ];
     serviceConfig.Type = "oneshot";
