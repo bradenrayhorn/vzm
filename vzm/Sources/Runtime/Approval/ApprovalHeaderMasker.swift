@@ -29,6 +29,8 @@ enum ApprovalHeaderMasker {
     ]
     private static let qualityRegex = try! NSRegularExpression(pattern: #"\A[0-9]{0,3}(?:\.[0-9]{0,3})?\z"#)
     private static let safeEncodings: Set<String> = ["zstd", "br", "gzip", "deflate", "bzip2", "xz"]
+    // Defensive token-length cap, not a documented Cloudflare maximum.
+    private static let cloudflareBotCookieRegex = try! NSRegularExpression(pattern: #"\A__cf_bm=[A-Za-z0-9._-]{1,512}\z"#)
 
     static func maskSafeHeaders(for request: ProxyApprovalRequest, knownUserAgents: [String]) -> [ProxyApprovalHeader] {
         request.headers.filter { 
@@ -82,6 +84,9 @@ enum ApprovalHeaderMasker {
             let accepts = value.split(separator: ",", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             return !accepts.isEmpty && accepts.allSatisfy(isSafeAcceptItem)
+        case "cookie":
+            // Only hide the bot-management cookie, never unrelated or mixed cookies.
+            return cloudflareBotCookieRegex.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
         case "content-length":
             return value == "0"
         case ":method":

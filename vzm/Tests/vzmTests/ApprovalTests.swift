@@ -166,6 +166,36 @@ final class ApprovalTests: XCTestCase {
         }
     }
 
+    func testCloudflareBotCookieIsMasked() {
+        for value in [
+            "__cf_bm=abc123-1793051291.6056817-1.0.1.1-ABC_def.ghi",
+            " \t__cf_bm=rotated-token_123.456 \t",
+            "__cf_bm=a",
+            "__cf_bm=" + String(repeating: "a", count: 512),
+        ] {
+            var r = request()
+            r.headers = [ProxyApprovalHeader(name: " cOoKiE ", value: value)]
+            XCTAssertTrue(ApprovalHeaderMasker.isSafe(r.headers[0], in: r), value)
+            XCTAssertTrue(ApprovalHeaderMasker.maskSafeHeaders(for: r, knownUserAgents: []).isEmpty, value)
+        }
+    }
+
+    func testOtherMixedAndMalformedCookiesRemainVisible() {
+        for value in [
+            "", "__cf_bm", "__cf_bm=", "__CF_BM=token", "__cf_bm_extra=token",
+            "session=secret", "cf_clearance=secret",
+            "__cf_bm=token; session=secret", "session=secret; __cf_bm=token",
+            "__cf_bm=token; __cf_bm=other", "__cf_bm=token;", "__cf_bm=token,session=secret",
+            "__cf_bm=token\r\nX-Data: secret", "__cf_bm=token with spaces",
+            "__cf_bm=" + String(repeating: "a", count: 513),
+        ] {
+            var r = request()
+            r.headers = [ProxyApprovalHeader(name: "Cookie", value: value)]
+            XCTAssertFalse(ApprovalHeaderMasker.isSafe(r.headers[0], in: r), value)
+            XCTAssertEqual(ApprovalHeaderMasker.maskSafeHeaders(for: r, knownUserAgents: []), r.headers, value)
+        }
+    }
+
     func testAcceptEncodingQualityValues() {
         let r = request()
         for value in [
