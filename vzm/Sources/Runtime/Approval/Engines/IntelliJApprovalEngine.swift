@@ -1,16 +1,9 @@
 import Foundation
 
-/// Approves read-only JetBrains IDE metadata and download requests for a short IDE session.
+/// Recognizes read-only JetBrains IDE metadata and download requests in Auto.
 /// Account, AI, and arbitrary JetBrains web requests intentionally do not match.
 final class IntelliJApprovalEngine: PatternApprovalEngine {
     override var name: String { "IntelliJ" }
-
-    init() {
-        super.init(gateBuilders: [
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 600),
-            RateLimitApprovalGate.new(windowSeconds: 60, maxRequests: 30),
-        ])
-    }
 
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         request.type == "REQUEST"

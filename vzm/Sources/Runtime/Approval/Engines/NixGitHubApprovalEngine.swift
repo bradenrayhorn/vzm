@@ -9,14 +9,6 @@ final class NixGitHubApprovalEngine: PatternApprovalEngine {
         try! NSRegularExpression(pattern: #"^api\.github\.com/repos/NixOS/nixpkgs/commits/nixos-(?:[0-9]{1,2}\.[0-9]{1,2}|unstable)$"#),
     ]
 
-    init() {
-        super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 2 * 60),
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
-            RateLimitApprovalGate.new(windowSeconds: 60, maxRequests: 60),
-        ])
-    }
-
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         request.type == "REQUEST"
             && request.secrets.isEmpty

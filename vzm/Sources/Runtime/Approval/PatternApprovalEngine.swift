@@ -1,9 +1,9 @@
 import Foundation
 
 /// Read-only request patterns with an explicitly approved header baseline.
-/// Matching and Auto eligibility never consume gates or establish consent.
+/// Matching and evaluation never establish consent.
 class PatternApprovalEngine: BaseApprovalEngine {
-    private var approvedHeaders: Set<ProxyApprovalHeader>?
+    private var approvedHeaders: Set<ProxyApprovalHeader> = []
 
     func matches(_ request: ProxyApprovalRequest) -> Bool {
         false
@@ -14,25 +14,15 @@ class PatternApprovalEngine: BaseApprovalEngine {
         request.headers
     }
 
-    override func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
-        matches(request) && (headersForApproval(request).isEmpty || headersWereApproved(request))
-    }
-
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard matches(request) else { return .unknown }
-
-        if headersWereApproved(request), checkGates() {
+    override func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
+        guard matches(request) else { return .notApplicable }
+        if approvedHeaders.isSuperset(of: headersForApproval(request)) {
             return .approved
         }
-        return .userApprovalRequired(.default)
+        return .needsConsent(.default)
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        approvedHeaders = (approvedHeaders ?? []).union(Set(headersForApproval(request)))
-        super.onEngineApproved(request)
-    }
-
-    private func headersWereApproved(_ request: ProxyApprovalRequest) -> Bool {
-        approvedHeaders?.isSuperset(of: Set(headersForApproval(request))) == true
+        approvedHeaders.formUnion(headersForApproval(request))
     }
 }

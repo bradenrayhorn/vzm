@@ -18,15 +18,13 @@ final class SecretRequestApprovalEngine: BaseApprovalEngine {
         super.init()
     }
 
-    override func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
-        guard let key = approvalKey(for: request) else { return false }
-        return recognizedElementStore.contains(key, type: .autoApprovedSecretRequest)
-    }
+    override func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
+        guard let key = approvalKey(for: request) else { return .notApplicable }
+        if recognizedElementStore.contains(key, type: .autoApprovedSecretRequest) {
+            return .approved
+        }
 
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard approvalKey(for: request) != nil else { return .unknown }
-
-        return .userApprovalRequired(
+        return .needsConsent(
             .presentation(
                 ApprovalPromptPresentation(
                     title: "Secret access approval",

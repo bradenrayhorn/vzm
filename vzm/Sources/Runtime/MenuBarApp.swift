@@ -115,7 +115,7 @@ typealias ApprovalCoordinatorResult = ApprovalPromptActionType
 class ApprovalModeCoordinator {
     static let shared = ApprovalModeCoordinator()
 
-    private(set) var mode: ApprovalMode = .default
+    private(set) var mode: ApprovalMode = .auto
     private var expirationTask: Task<Void, Never>?
     private let modeState = ApprovalModeState.shared
 
@@ -134,7 +134,7 @@ class ApprovalModeCoordinator {
             guard !Task.isCancelled, self?.mode == .approveEverything(until: deadline) else {
                 return
             }
-            self?.select(.default)
+            self?.select(.auto)
         }
     }
 
@@ -148,11 +148,6 @@ struct ApprovalModeMenuView: View {
 
     var body: some View {
         Section("Approvals") {
-            Button {
-                coordinator.select(.default)
-            } label: {
-                Label("Default", systemImage: coordinator.mode == .default ? "checkmark.circle.fill" : "circle")
-            }
             Button {
                 coordinator.select(.auto)
             } label: {
@@ -171,6 +166,12 @@ struct ApprovalModeMenuView: View {
                 } else {
                     Text("Approve Everything")
                 }
+            }
+
+            Button {
+                coordinator.select(.strict)
+            } label: {
+                Label("Strict", systemImage: coordinator.mode == .strict ? "checkmark.circle.fill" : "circle")
             }
         }
         .frame(minWidth: 280, alignment: .leading)

@@ -1,13 +1,13 @@
 import Foundation
 
 enum ApprovalMode: Equatable, Sendable {
-    case `default`
+    case strict
     case auto
     case approveEverything(until: Date)
 
     var label: String {
         switch self {
-        case .default: "Default"
+        case .strict: "Strict"
         case .auto: "Auto"
         case .approveEverything: "Approve Everything"
         }
@@ -20,7 +20,7 @@ final class ApprovalModeState: @unchecked Sendable {
     static let shared = ApprovalModeState()
 
     private let lock = NSLock()
-    private var mode: ApprovalMode = .default
+    private var mode: ApprovalMode = .auto
 
     func select(_ mode: ApprovalMode) {
         lock.lock()
@@ -32,7 +32,7 @@ final class ApprovalModeState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if case let .approveEverything(deadline) = mode, now >= deadline {
-            mode = .default
+            mode = .auto
         }
         return mode
     }

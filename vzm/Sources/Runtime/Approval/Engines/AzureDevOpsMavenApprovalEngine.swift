@@ -20,14 +20,8 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
         let secrets: [String]
     }
 
-    private struct Session {
-        let consent: Consent
-        let gates: [any ApprovalGate]
-    }
-
     private let recognizedElementStore: RecognizedElementStore
     private var approvedFeeds: [String: Consent] = [:]
-    private var sessions: [String: Session] = [:]
 
     private static let host = "pkgs.dev.azure.com"
     private static let pathRegex = try! NSRegularExpression(
@@ -36,10 +30,7 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
 
     init(recognizedElementStore: RecognizedElementStore) {
         self.recognizedElementStore = recognizedElementStore
-        super.init(gateBuilders: [
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 1800),
-            RateLimitApprovalGate.new(windowSeconds: 30, maxRequests: 120),
-        ])
+        super.init()
         do {
             for element in try recognizedElementStore.elements(type: .approvedAzureDevOpsMavenFeed) {
                 guard let feed = try? JSONDecoder().decode(StoredFeed.self, from: Data(element.utf8)) else { continue }
@@ -53,26 +44,16 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
         }
     }
 
-    override func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
-        guard let prefix = repositoryPrefixIfMatchingRequest(request) else { return false }
-        // Persistent consent is feed-specific; Auto never consumes session gates.
-        return approvedFeeds[prefix]?.allows(request) == true
-    }
-
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard let prefix = repositoryPrefixIfMatchingRequest(request) else { return .unknown }
-        if let session = sessions[prefix],
-           session.consent.allows(request),
-           session.gates.allSatisfy({ $0.canContinue() }) {
+    override func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
+        guard let prefix = repositoryPrefixIfMatchingRequest(request) else { return .notApplicable }
+        if approvedFeeds[prefix]?.allows(request) == true {
             return .approved
         }
-
-        return .userApprovalRequired(.presentation(ApprovalPromptPresentation(
+        return .needsConsent(.presentation(ApprovalPromptPresentation(
             title: "Outbound",
             subtitle: "🚂 available: \(name)",
             warnings: [
-                "‘Approve engine’ permanently allows this Azure Maven feed in Auto with the approved headers and secret names. "
-                    + "Default mode uses a temporary feed session.",
+                "‘Approve engine’ permanently allows this Azure Maven feed in Auto with the approved headers and secret names.",
             ],
             sections: [ApprovalPromptSection(title: "Feed", text: prefix)] + ApprovalPromptSection.requestDetails(for: request),
             actions: [
@@ -89,8 +70,6 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
         consent.headers.formUnion(request.headers.map(Self.headerFingerprint))
         consent.secrets.formUnion(request.secrets)
         approvedFeeds[prefix] = consent
-        // Each feed has independent, runtime-only Default-mode gates.
-        sessions[prefix] = Session(consent: consent, gates: gateBuilders.map { $0() })
 
         let feed = StoredFeed(prefix: prefix, headers: consent.headers.sorted(), secrets: consent.secrets.sorted())
         do {

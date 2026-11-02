@@ -1,6 +1,6 @@
 import Foundation
 
-/// Approves the read-only Docker Hub image-pull protocol after the user approves it once.
+/// Recognizes the read-only Docker Hub image-pull protocol in Auto.
 final class DockerHubApprovalEngine: PatternApprovalEngine {
     override var name: String { "DockerHub" }
 
@@ -24,14 +24,6 @@ final class DockerHubApprovalEngine: PatternApprovalEngine {
         "application/vnd.docker.container.image.v1+json",
         "application/vnd.docker.image.rootfs.diff.tar.gzip",
     ]
-
-    init() {
-        super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 10 * 60),
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 60),
-            RateLimitApprovalGate.new(windowSeconds: 30, maxRequests: 240),
-        ])
-    }
 
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         request.type == "REQUEST"

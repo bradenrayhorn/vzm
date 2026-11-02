@@ -13,14 +13,6 @@ final class MavenRepositoryApprovalEngine: PatternApprovalEngine {
         pattern: #"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+$"#
     )
 
-    init() {
-        super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 10 * 60),
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 60),
-            RateLimitApprovalGate.new(windowSeconds: 30, maxRequests: 240),
-        ])
-    }
-
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         request.type == "REQUEST"
             && request.secrets.isEmpty

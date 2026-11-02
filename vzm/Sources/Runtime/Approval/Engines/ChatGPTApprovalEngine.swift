@@ -9,13 +9,6 @@ final class ChatGPTApprovalEngine: BaseApprovalEngine {
         pattern: #"^chatgpt\.com/backend-api/codex/responses$"#
     )
 
-    override func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
-        guard matches(request), let accountID = accountID(for: request) else {
-            return false
-        }
-        return approvedAccountIDs.contains(accountID)
-    }
-
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
         guard matches(request), let accountID = accountID(for: request) else { return }
         approvedAccountIDs.insert(accountID)
@@ -38,10 +31,13 @@ final class ChatGPTApprovalEngine: BaseApprovalEngine {
         return value.isEmpty ? nil : value
     }
 
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard matches(request) else { return .unknown }
+    override func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
+        guard matches(request) else { return .notApplicable }
+        if let accountID = accountID(for: request), approvedAccountIDs.contains(accountID) {
+            return .approved
+        }
 
-        return .userApprovalRequired(
+        return .needsConsent(
             .presentation(
                 ApprovalPromptPresentation(
                     title: "ChatGPT session",

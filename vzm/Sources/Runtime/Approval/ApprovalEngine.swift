@@ -3,14 +3,20 @@ import Foundation
 protocol ApprovalEngine {
     var name: String { get }
 
-    /// Side-effect-free eligibility; excludes session gates and never grants consent.
-    func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool
-    func handle(_ request: ProxyApprovalRequest) -> EngineResult
+    func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation
     func onEngineApproved(_ request: ProxyApprovalRequest)
 }
 
-extension ApprovalEngine {
-    func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool { false }
+/// A matching hard-deny rule blocks the request before any approval policy.
+protocol DenyRule {
+    var name: String { get }
+    func matches(_ request: ProxyApprovalRequest) -> Bool
+}
+
+enum EngineEvaluation {
+    case notApplicable
+    case approved
+    case needsConsent(EnginePrompt)
 }
 
 struct ApprovalPromptSection: Codable, Sendable {
@@ -93,32 +99,11 @@ enum EnginePrompt {
 open class BaseApprovalEngine: ApprovalEngine {
     open var name: String { String(describing: Self.self) }
 
-    let gateBuilders: [ApprovalGateBuilder]
-    private(set) var gates: [any ApprovalGate] = []
-
-    init(gateBuilders: [ApprovalGateBuilder] = []) {
-        self.gateBuilders = gateBuilders
+    func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
+        .notApplicable
     }
 
-    private func initGates() {
-        gates = gateBuilders.map { $0() }
-    }
-
-    open func checkGates() -> Bool {
-        gates.allSatisfy { $0.canContinue() }
-    }
-
-    func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
-        false
-    }
-
-    func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        .unknown
-    }
-
-    func onEngineApproved(_ request: ProxyApprovalRequest) {
-        initGates()
-    }
+    func onEngineApproved(_ request: ProxyApprovalRequest) {}
 
     func urlMatches(regexes: [NSRegularExpression], _ url: String) -> Bool {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -129,17 +114,4 @@ open class BaseApprovalEngine: ApprovalEngine {
         }
     }
 }
-
-enum EngineResult {
-    case approved
-    case denied
-    case userApprovalRequired(EnginePrompt)
-    case unknown
-}
-
-protocol ApprovalGate {
-    func canContinue() -> Bool
-}
-
-typealias ApprovalGateBuilder = () -> ApprovalGate
 

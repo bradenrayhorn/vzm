@@ -39,9 +39,8 @@ actor ApprovalService {
     }
 
     private let recognizedElementStore: RecognizedElementStore
-    private let denyEngines: [any ApprovalEngine]
+    private let denyRules: [any DenyRule]
     private let engines: [any ApprovalEngine]
-    private let rawTCPApprovalEngine: RawTCPApprovalEngine
     private let modeState: ApprovalModeState
     private let promptUser: (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult
     private var approvalInProgress = false
@@ -49,7 +48,7 @@ actor ApprovalService {
 
     init(
         fileManager: FileManager = .default,
-        denyEngines: [any ApprovalEngine]? = nil,
+        denyRules: [any DenyRule]? = nil,
         engines: [any ApprovalEngine]? = nil,
         recognizedElementStore: RecognizedElementStore? = nil,
         modeState: ApprovalModeState = .shared,
@@ -61,11 +60,10 @@ actor ApprovalService {
         self.recognizedElementStore = recognizedElementStore
         self.modeState = modeState
         self.promptUser = promptUser
-        self.denyEngines = denyEngines ?? [
-            DenyTrackingApprovalEngine(),
-            DenyJetBrainsOptionalServicesApprovalEngine(),
+        self.denyRules = denyRules ?? [
+            DenyTrackingRule(),
+            DenyJetBrainsOptionalServicesRule(),
         ]
-        self.rawTCPApprovalEngine = RawTCPApprovalEngine()
         self.engines = engines ?? [
             AzureDevOpsMavenApprovalEngine(recognizedElementStore: recognizedElementStore),
             AzureDevOpsNpmApprovalEngine(),
@@ -133,12 +131,9 @@ actor ApprovalService {
             warnings.append(Self.rawTCPWarning)
         }
 
-        for engine in denyEngines {
-            switch engine.handle(request) {
-            case .denied:
-                return .denied(request: request, reason: "deny engine \(engine.name)")
-            case .approved, .userApprovalRequired, .unknown:
-                break
+        for rule in denyRules {
+            if rule.matches(request) {
+                return .denied(request: request, reason: "deny rule \(rule.name)")
             }
         }
 
@@ -148,41 +143,12 @@ actor ApprovalService {
 
         request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: knownUserAgents)
 
-        // Raw TCP payloads cannot be inspected, so only the dedicated bounded
-        // raw TCP engine may auto-approve an already-approved destination.
-        // Normal approval engines must never approve raw TCP traffic.
-        if isRawTCP {
-            switch rawTCPApprovalEngine.handle(request) {
-            case .approved:
-                return .approved(request: request, reason: "engine \(rawTCPApprovalEngine.name)")
-            case let .userApprovalRequired(prompt):
-                return .needsUserApproval(
-                    PendingApproval(
-                        request: request,
-                        selectedEngine: SelectedEngine(engine: rawTCPApprovalEngine, prompt: prompt),
-                        warnings: warnings,
-                        knownDomain: false,
-                        userAgents: userAgents,
-                        knownUserAgents: knownUserAgents
-                    )
-                )
-            case .denied, .unknown:
-                return .needsUserApproval(
-                    PendingApproval(
-                        request: request,
-                        selectedEngine: nil,
-                        warnings: warnings,
-                        knownDomain: false,
-                        userAgents: userAgents,
-                        knownUserAgents: knownUserAgents
-                    )
-                )
-            }
-        }
+        let mode = modeState.current()
 
-        // A new CONNECT domain always requires explicit consent, in every mode.
-        // Neither general approval modes nor pattern engines may establish it.
-        if request.type == "CONNECT" {
+        // Strict never reuses engine consent. New CONNECT domains and raw TCP
+        // connections also require one-shot approval in every mode.
+        // Already-open connections are unaffected by approval-mode changes.
+        if mode == .strict || isRawTCP || request.type == "CONNECT" {
             return .needsUserApproval(
                 PendingApproval(
                     request: request,
@@ -195,7 +161,6 @@ actor ApprovalService {
             )
         }
 
-        let mode = modeState.current()
         if case .approveEverything = mode,
            !isGit, request.type != "WEBSOCKET", request.secrets.isEmpty {
             return .approved(request: request, reason: "mode Approve Everything")
@@ -203,20 +168,14 @@ actor ApprovalService {
 
         var selectedEngine: SelectedEngine?
         for engine in engines {
-            if mode == .auto && engine.isEligibleForAuto(request) {
-                return .approved(request: request, reason: "mode Auto, engine \(engine.name)")
-            }
-
-            switch engine.handle(request) {
+            switch engine.evaluate(request) {
             case .approved:
-                return .approved(request: request, reason: "engine \(engine.name)")
-            case .denied:
-                return .denied(request: request, reason: "engine \(engine.name)")
-            case let .userApprovalRequired(prompt):
+                return .approved(request: request, reason: "Auto rule, engine \(engine.name)")
+            case let .needsConsent(prompt):
                 if selectedEngine == nil {
                     selectedEngine = SelectedEngine(engine: engine, prompt: prompt)
                 }
-            case .unknown:
+            case .notApplicable:
                 break
             }
         }
@@ -235,9 +194,9 @@ actor ApprovalService {
 
     private func askUserForApproval(_ pendingApproval: PendingApproval) async -> Bool {
         var request = pendingApproval.request
-        let action = await promptUser(
-            ApprovalCoordinatorRequest(presentation: buildPromptPresentation(for: pendingApproval))
-        )
+        let presentation = buildPromptPresentation(for: pendingApproval)
+        let action = await promptUser(ApprovalCoordinatorRequest(presentation: presentation))
+        guard action != .approveEngine || pendingApproval.selectedEngine != nil else { return false }
 
         if action.isApproved && pendingApproval.userAgents.count > pendingApproval.knownUserAgents.count {
             for userAgent in Set(pendingApproval.userAgents).subtracting(Set(pendingApproval.knownUserAgents)) {
@@ -255,7 +214,8 @@ actor ApprovalService {
             pendingApproval.selectedEngine?.engine.onEngineApproved(request)
         }
 
-        if action.isApproved && !pendingApproval.knownDomain && request.type != "TCP_CONNECT" {
+        if action.isApproved && !pendingApproval.knownDomain && !request.domain.isEmpty
+            && request.type != "TCP_CONNECT" {
             do {
                 try recognizedElementStore.insert(request.domain, type: .domain)
             } catch {
@@ -301,7 +261,7 @@ actor ApprovalService {
         }
 
         actions.append(
-            ApprovalPromptAction(id: .approveOnce, label: "✅ Approve", keyboardShortcut: .defaultAction)
+            ApprovalPromptAction(id: .approveOnce, label: "✅ Approve once", keyboardShortcut: .defaultAction)
         )
 
         return actions

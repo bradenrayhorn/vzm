@@ -12,14 +12,6 @@ final class GradleDistributionApprovalEngine: PatternApprovalEngine {
         ),
     ]
 
-    init() {
-        super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 8 * 60),
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 60),
-            RateLimitApprovalGate.new(windowSeconds: 60, maxRequests: 30),
-        ])
-    }
-
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         request.type == "REQUEST"
             && request.secrets.isEmpty

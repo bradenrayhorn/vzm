@@ -19,34 +19,32 @@ final class ApproveForeverApprovalEngine: BaseApprovalEngine {
 
     init(recognizedElementStore: RecognizedElementStore) {
         self.recognizedElementStore = recognizedElementStore
-        super.init(gateBuilders: [
-            RateLimitApprovalGate.new(windowSeconds: 60, maxRequests: 5),
-        ])
+        super.init()
     }
 
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
+    override func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
         guard request.type == "REQUEST" else {
-            return .unknown
+            return .notApplicable
         }
         guard (request.method == "GET" || request.method == "HEAD") else {
-            return .unknown
+            return .notApplicable
         }
         guard request.secrets.isEmpty else {
-            return .unknown
+            return .notApplicable
         }
         guard request.body == nil else {
-            return .unknown
+            return .notApplicable
         }
         guard request.headers.isEmpty else {
-            return .unknown
+            return .notApplicable
         }
 
         let approvedRequest = ApprovedForeverRequest(method: request.method, url: request.url)
-        if recognizedElementStore.contains(approvedRequest.normalize(), type: .approvedForeverRequest), checkGates() {
+        if recognizedElementStore.contains(approvedRequest.normalize(), type: .approvedForeverRequest) {
             return .approved
         }
 
-        return .userApprovalRequired(
+        return .needsConsent(
             .presentation(
                 ApprovalPromptPresentation(
                     title: "Outbound",
@@ -67,7 +65,6 @@ final class ApproveForeverApprovalEngine: BaseApprovalEngine {
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        super.onEngineApproved(request)
         do {
             try recognizedElementStore.insert(ApprovedForeverRequest(method: request.method, url: request.url).normalize(), type: .approvedForeverRequest)
         } catch {

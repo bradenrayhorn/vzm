@@ -3,14 +3,6 @@ import Foundation
 final class YarnPkgApprovalEngine: PatternApprovalEngine {
     override var name: String { "YarnPkg" }
 
-    init() {
-        super.init(gateBuilders: [
-            TimeWindowApprovalGate.new(durationSeconds: 10 * 60),
-            IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 30),
-            RateLimitApprovalGate.new(windowSeconds: 120, maxRequests: 2_000),
-        ])
-    }
-
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         guard request.type == "REQUEST", request.secrets.isEmpty,
               request.body == nil, request.method == "GET",

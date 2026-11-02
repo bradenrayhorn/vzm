@@ -1,19 +1,15 @@
 import Foundation
 
-final class DenyTrackingApprovalEngine: BaseApprovalEngine {
-    override var name: String { "DenyTracking" }
+final class DenyTrackingRule: DenyRule {
+    var name: String { "DenyTracking" }
 
     private static let blockedDomains = [
         "telemetry.nextjs.org",
         "config.liquibase.com"
     ]
 
-    override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        if Self.blockedDomains.contains(Self.normalizedDomain(request.domain)) {
-            return .denied
-        }
-
-        return .unknown
+    func matches(_ request: ProxyApprovalRequest) -> Bool {
+        Self.blockedDomains.contains(Self.normalizedDomain(request.domain))
     }
 
     private static func normalizedDomain(_ domain: String) -> String {
