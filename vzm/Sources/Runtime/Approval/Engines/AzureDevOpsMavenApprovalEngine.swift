@@ -1,55 +1,114 @@
+import CryptoKit
 import Foundation
 
 final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
     override var name: String { "AzureDevOpsMaven" }
 
-    private var approvedRepositoryPrefix: String?
-    private var approvedHeaders: Set<ProxyApprovalHeader>?
-    private var approvedSecrets: Set<String>?
+    private struct Consent {
+        var headers: Set<String> = []
+        var secrets: Set<String> = []
+
+        func allows(_ request: ProxyApprovalRequest) -> Bool {
+            headers.isSuperset(of: request.headers.map(AzureDevOpsMavenApprovalEngine.headerFingerprint))
+                && secrets.isSuperset(of: request.secrets)
+        }
+    }
+
+    private struct StoredFeed: Codable {
+        let prefix: String
+        let headers: [String]
+        let secrets: [String]
+    }
+
+    private struct Session {
+        let consent: Consent
+        let gates: [any ApprovalGate]
+    }
+
+    private let recognizedElementStore: RecognizedElementStore
+    private var approvedFeeds: [String: Consent] = [:]
+    private var sessions: [String: Session] = [:]
 
     private static let host = "pkgs.dev.azure.com"
     private static let pathRegex = try! NSRegularExpression(
         pattern: #"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+$"#
     )
 
-    init() {
+    init(recognizedElementStore: RecognizedElementStore) {
+        self.recognizedElementStore = recognizedElementStore
         super.init(gateBuilders: [
             IdleTimeoutApprovalGate.new(idleTimeoutSeconds: 1800),
             RateLimitApprovalGate.new(windowSeconds: 30, maxRequests: 120),
         ])
+        do {
+            for element in try recognizedElementStore.elements(type: .approvedAzureDevOpsMavenFeed) {
+                guard let feed = try? JSONDecoder().decode(StoredFeed.self, from: Data(element.utf8)) else { continue }
+                var consent = approvedFeeds[feed.prefix] ?? Consent()
+                consent.headers.formUnion(feed.headers)
+                consent.secrets.formUnion(feed.secrets)
+                approvedFeeds[feed.prefix] = consent
+            }
+        } catch {
+            StandardError.writeLine("Failed to load approved Azure Maven feeds: \(error)")
+        }
     }
 
     override func isEligibleForAuto(_ request: ProxyApprovalRequest) -> Bool {
-        guard repositoryPrefixIfMatchingRequest(request) != nil else { return false }
-
-        // Auto reuses explicit header/secret consent across matching feeds,
-        // without consuming session gates or establishing new consent.
-        return (request.headers.isEmpty || approvedHeaders?.isSuperset(of: Set(request.headers)) == true)
-            && (request.secrets.isEmpty || approvedSecrets?.isSuperset(of: Set(request.secrets)) == true)
+        guard let prefix = repositoryPrefixIfMatchingRequest(request) else { return false }
+        // Persistent consent is feed-specific; Auto never consumes session gates.
+        return approvedFeeds[prefix]?.allows(request) == true
     }
 
     override func handle(_ request: ProxyApprovalRequest) -> EngineResult {
-        guard let repositoryPrefix = repositoryPrefixIfMatchingRequest(request) else { return .unknown }
-
-        if let approvedRepositoryPrefix,
-           let approvedHeaders,
-           let approvedSecrets,
-           repositoryPrefix == approvedRepositoryPrefix,
-           approvedHeaders.isSuperset(of: Set(request.headers)),
-           approvedSecrets.isSuperset(of: Set(request.secrets)),
-           checkGates() {
+        guard let prefix = repositoryPrefixIfMatchingRequest(request) else { return .unknown }
+        if let session = sessions[prefix],
+           session.consent.allows(request),
+           session.gates.allSatisfy({ $0.canContinue() }) {
             return .approved
         }
 
-        return .userApprovalRequired(.default)
+        return .userApprovalRequired(.presentation(ApprovalPromptPresentation(
+            title: "Outbound",
+            subtitle: "🚂 available: \(name)",
+            warnings: [
+                "‘Approve engine’ permanently allows this Azure Maven feed in Auto with the approved headers and secret names. "
+                    + "Default mode uses a temporary feed session.",
+            ],
+            sections: [ApprovalPromptSection(title: "Feed", text: prefix)] + ApprovalPromptSection.requestDetails(for: request),
+            actions: [
+                ApprovalPromptAction(id: .deny, label: "❌ Deny", keyboardShortcut: .cancelAction),
+                ApprovalPromptAction(id: .approveEngine, label: "🚂 Approve engine", keyboardShortcut: .optionReturn),
+                ApprovalPromptAction(id: .approveOnce, label: "✅ Approve", keyboardShortcut: .defaultAction),
+            ]
+        )))
     }
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
-        guard let repositoryPrefix = repositoryPrefixIfMatchingRequest(request) else { return }
-        approvedRepositoryPrefix = repositoryPrefix
-        approvedHeaders = (approvedHeaders ?? []).union(Set(request.headers))
-        approvedSecrets = (approvedSecrets ?? []).union(Set(request.secrets))
-        super.onEngineApproved(request)
+        guard let prefix = repositoryPrefixIfMatchingRequest(request) else { return }
+        var consent = approvedFeeds[prefix] ?? Consent()
+        consent.headers.formUnion(request.headers.map(Self.headerFingerprint))
+        consent.secrets.formUnion(request.secrets)
+        approvedFeeds[prefix] = consent
+        // Each feed has independent, runtime-only Default-mode gates.
+        sessions[prefix] = Session(consent: consent, gates: gateBuilders.map { $0() })
+
+        let feed = StoredFeed(prefix: prefix, headers: consent.headers.sorted(), secrets: consent.secrets.sorted())
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let element = String(decoding: try encoder.encode(feed), as: UTF8.self)
+            try recognizedElementStore.insert(element, type: .approvedAzureDevOpsMavenFeed)
+        } catch {
+            StandardError.writeLine("Failed to persist approved Azure Maven feed: \(error)")
+        }
+    }
+
+    private static func headerFingerprint(_ header: ProxyApprovalHeader) -> String {
+        // Keep exact header consent without writing credentials/header values to disk.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try! encoder.encode(header)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func repositoryPrefixIfMatchingRequest(_ request: ProxyApprovalRequest) -> String? {
@@ -76,22 +135,35 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
         }
 
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count > 6 else {
+        // org[/project]/_packaging/feed/maven/v1/group/artifact/version/file
+        let packagingIndex: Int
+        if parts.count > 5, parts[1] == "_packaging" {
+            packagingIndex = 1
+        } else if parts.count > 6, parts[2] == "_packaging" {
+            packagingIndex = 2
+        } else {
             return nil
         }
-        guard parts[1] == "_packaging", parts[3] == "maven", parts[4] == "v1" else {
-            return nil
-        }
-        guard !parts[0].isEmpty, !parts[2].isEmpty else {
-            return nil
-        }
+        let names = Array(parts.prefix(packagingIndex)) + [parts[packagingIndex + 1]]
+        guard names.allSatisfy(Self.isFeedName),
+              parts[packagingIndex + 2] == "maven", parts[packagingIndex + 3] == "v1"
+        else { return nil }
 
-        let artifactPath = parts.dropFirst(5).joined(separator: "/")
+        let prefixLength = packagingIndex + 4
+        let artifactPath = parts.dropFirst(prefixLength).joined(separator: "/")
         guard isMavenArtifactPath(artifactPath) else {
             return nil
         }
 
-        return "\(Self.host)/\(parts[0])/_packaging/\(parts[2])/maven/v1/"
+        return "\(Self.host)/\(parts.prefix(prefixLength).joined(separator: "/"))/"
+    }
+
+    private static func isFeedName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".."
+            && name.utf8.allSatisfy { byte in
+                (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte)
+                    || byte == 45 || byte == 46 || byte == 95
+            }
     }
 
     private func isMavenArtifactPath(_ path: String) -> Bool {
@@ -105,7 +177,9 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
         let artifact = parts[parts.count - 3]
         let groupParts = Array(parts.dropLast(3))
 
-        guard !version.isEmpty, !artifact.isEmpty, !filename.isEmpty, !groupParts.contains(where: \.isEmpty) else {
+        guard !version.isEmpty, !artifact.isEmpty, !filename.isEmpty, !groupParts.contains(where: \.isEmpty),
+              !parts.contains(where: { $0 == "." || $0 == ".." })
+        else {
             return false
         }
         guard Self.matchesPathCharacters(path) else {

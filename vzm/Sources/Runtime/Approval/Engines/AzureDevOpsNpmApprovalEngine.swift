@@ -1,7 +1,7 @@
 import Foundation
 
-/// Mirrors AzureDevOpsMaven consent: a bounded feed session in Default,
-/// and in-memory header/secret consent reusable across matching feeds in Auto.
+/// A bounded feed session in Default, with in-memory header/secret consent
+/// reusable across matching feeds in Auto (unlike Maven's persisted per-feed consent).
 final class AzureDevOpsNpmApprovalEngine: BaseApprovalEngine {
     override var name: String { "AzureDevOpsNpm" }
 

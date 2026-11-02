@@ -67,7 +67,7 @@ actor ApprovalService {
         ]
         self.rawTCPApprovalEngine = RawTCPApprovalEngine()
         self.engines = engines ?? [
-            AzureDevOpsMavenApprovalEngine(),
+            AzureDevOpsMavenApprovalEngine(recognizedElementStore: recognizedElementStore),
             AzureDevOpsNpmApprovalEngine(),
             SecretRequestApprovalEngine(recognizedElementStore: recognizedElementStore),
             ChatGPTApprovalEngine(),

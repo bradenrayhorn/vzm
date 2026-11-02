@@ -6,6 +6,7 @@ enum RecognizedElementType: String {
     case userAgent
     case approvedForeverRequest
     case autoApprovedSecretRequest
+    case approvedAzureDevOpsMavenFeed
 }
 
 final class RecognizedElementStore {
@@ -54,6 +55,25 @@ final class RecognizedElementStore {
         }
     }
 
+    /// Enumerates only markers whose contents match their hashed filename.
+    func elements(type: RecognizedElementType) throws -> [String] {
+        let urls = try fileManager.contentsOfDirectory(
+            at: directoryURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
+        )
+        let prefix = "\(type.rawValue)\n"
+        return urls.compactMap { url in
+            guard let data = try? Data(contentsOf: url),
+                  let marker = String(data: data, encoding: .utf8),
+                  marker.hasPrefix(prefix)
+            else { return nil }
+            let element = String(marker.dropFirst(prefix.count))
+            guard !element.isEmpty,
+                  url.lastPathComponent == Self.markerName(for: element, type: type)
+            else { return nil }
+            return element
+        }
+    }
+
     private func createDirectory() throws {
         try fileManager.createDirectory(
             at: directoryURL,
@@ -86,7 +106,7 @@ final class RecognizedElementStore {
             return domain
         case .userAgent:
             return element.trimmingCharacters(in: .whitespaces)
-        case .approvedForeverRequest, .autoApprovedSecretRequest:
+        case .approvedForeverRequest, .autoApprovedSecretRequest, .approvedAzureDevOpsMavenFeed:
             return element
         }
     }

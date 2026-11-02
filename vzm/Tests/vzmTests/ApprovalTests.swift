@@ -81,8 +81,9 @@ final class ApprovalTests: XCTestCase {
         return r
     }
 
-    private func azureMavenRequest(organization: String = "org", feed: String = "feed") -> ProxyApprovalRequest {
-        var r = request("pkgs.dev.azure.com/\(organization)/_packaging/\(feed)/maven/v1/org/example/lib/1.0/lib-1.0.jar")
+    private func azureMavenRequest(organization: String = "org", project: String? = nil, feed: String = "feed") -> ProxyApprovalRequest {
+        let prefix = project.map { "\(organization)/\($0)" } ?? organization
+        var r = request("pkgs.dev.azure.com/\(prefix)/_packaging/\(feed)/maven/v1/org/example/lib/1.0/lib-1.0.jar")
         r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer {vzm:PAT}")]
         r.secrets = ["PAT"]
         return r
@@ -1026,38 +1027,119 @@ final class ApprovalTests: XCTestCase {
         XCTAssertEqual(presentations.first?.title, "Outbound")
         XCTAssertEqual(presentations.first?.subtitle, "🚂 available: AzureDevOpsMaven")
         XCTAssertEqual(presentations.first?.actions.first { $0.id == .approveEngine }?.label, "🚂 Approve engine")
+        XCTAssertTrue(presentations.first?.warnings.contains { $0.contains("permanently") } == true)
+        XCTAssertEqual(presentations.first?.sections.first { $0.title == "Feed" }?.text, "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/")
     }
 
-    func testAzureMavenAutoReusesConsentAcrossFeedsInMemoryOnly() async throws {
+    func testAzureMavenMultipleFeedsPersistForAutoButNotDefaultSessions() async throws {
         let service = try service()
         mode.select(.auto)
         let r = azureMavenRequest()
-        await assertDecision(service, r, false)
-        await prompts.setAction(.approveEngine)
-        await assertDecision(service, r, true)
-        await prompts.setAction(.deny)
-
-        var otherFeed = azureMavenRequest(organization: "another-org", feed: "another-feed")
+        var otherFeed = azureMavenRequest(organization: "another-org", project: "project", feed: "another-feed")
         otherFeed.method = "HEAD"
-        await assertDecision(service, otherFeed, true)
-        mode.select(.default)
-        await assertDecision(service, otherFeed, false)
+        for feed in [r, otherFeed] {
+            await prompts.setAction(.deny)
+            await assertDecision(service, feed, false)
+            await prompts.setAction(.approveEngine)
+            await assertDecision(service, feed, true)
+        }
+        await prompts.setAction(.deny)
+        for selection in [ApprovalMode.auto, .default] {
+            mode.select(selection)
+            await assertDecision(service, r, true)
+            await assertDecision(service, otherFeed, true)
+        }
         mode.select(.auto)
-        await assertDecision(service, otherFeed, true)
-
         var changed = otherFeed
         changed.secrets.append("NEW_SECRET")
         await assertDecision(service, changed, false)
         changed = otherFeed
         changed.headers.append(ProxyApprovalHeader(name: "X-New", value: "new value"))
         await assertDecision(service, changed, false)
-        let presentations = await prompts.presentations
-        XCTAssertEqual(presentations.count, 5)
 
         store = try RecognizedElementStore(directoryURL: directory)
         let restartedService = try self.service()
-        await assertDecision(restartedService, r, false)
-        await assertDecision(restartedService, otherFeed, false)
+        for feed in [r, otherFeed] {
+            await assertDecision(restartedService, feed, true)
+        }
+        mode.select(.default)
+        for feed in [r, otherFeed] {
+            await assertDecision(restartedService, feed, false)
+        }
+    }
+
+    func testAzureMavenConsentIsIsolatedByOrganizationProjectAndFeed() throws {
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        let r = azureMavenRequest(project: "project")
+        engine.onEngineApproved(r)
+        for other in [
+            azureMavenRequest(),
+            azureMavenRequest(project: "other-project"),
+            azureMavenRequest(project: "project", feed: "other-feed"),
+            azureMavenRequest(organization: "other-org", project: "project"),
+        ] {
+            XCTAssertFalse(engine.isEligibleForAuto(other), other.url)
+            if case .userApprovalRequired = engine.handle(other) {} else { XCTFail(other.url) }
+            var readOnly = other
+            readOnly.headers = []
+            readOnly.secrets = []
+            XCTAssertFalse(engine.isEligibleForAuto(readOnly), other.url)
+        }
+
+        var other = azureMavenRequest(project: "other-project")
+        other.headers = [ProxyApprovalHeader(name: "X-Other", value: "other")]
+        other.secrets = ["OTHER"]
+        engine.onEngineApproved(other)
+        var changed = r
+        changed.headers = other.headers
+        changed.secrets = other.secrets
+        XCTAssertFalse(engine.isEligibleForAuto(changed))
+        changed = other
+        changed.headers = r.headers
+        changed.secrets = r.secrets
+        XCTAssertFalse(engine.isEligibleForAuto(changed))
+
+        let restarted = AzureDevOpsMavenApprovalEngine(recognizedElementStore: try RecognizedElementStore(directoryURL: directory))
+        XCTAssertTrue(restarted.isEligibleForAuto(r))
+        XCTAssertTrue(restarted.isEligibleForAuto(other))
+        XCTAssertFalse(restarted.isEligibleForAuto(changed))
+    }
+
+    func testAzureMavenUnauthenticatedFeedStillRequiresPersistedConsent() throws {
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        var r = azureMavenRequest()
+        r.headers = []
+        r.secrets = []
+        XCTAssertFalse(engine.isEligibleForAuto(r))
+        engine.onEngineApproved(r)
+        XCTAssertTrue(engine.isEligibleForAuto(r))
+        let restarted = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        XCTAssertTrue(restarted.isEligibleForAuto(r))
+        var other = r
+        other.url = azureMavenRequest(project: "project").url
+        XCTAssertFalse(restarted.isEligibleForAuto(other))
+        r.secrets = ["NEW_SECRET"]
+        XCTAssertFalse(restarted.isEligibleForAuto(r))
+    }
+
+    func testAzureMavenProjectScopedKotlinArtifacts() throws {
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        let prefix = "pkgs.dev.azure.com/bushelpowered/bidl/_packaging/bidl/maven/v1/dev/bidl/kotlin-core-jvm/0.58/kotlin-core-jvm-0.58"
+        var r = azureMavenRequest(organization: "bushelpowered", project: "bidl", feed: "bidl")
+        r.url = prefix + ".module"
+        XCTAssertFalse(engine.isEligibleForAuto(r))
+        if case .userApprovalRequired = engine.handle(r) {} else { XCTFail("Project feed did not match") }
+        engine.onEngineApproved(r)
+        let restarted = AzureDevOpsMavenApprovalEngine(recognizedElementStore: try RecognizedElementStore(directoryURL: directory))
+        for ext in ["module", "jar", "pom", "jar.sha256"] {
+            for method in ["GET", "HEAD"] {
+                r.url = prefix + "." + ext
+                r.method = method
+                XCTAssertTrue(engine.isEligibleForAuto(r), r.url)
+                XCTAssertTrue(restarted.isEligibleForAuto(r), r.url)
+                if case .approved = engine.handle(r) {} else { XCTFail(r.url) }
+            }
+        }
     }
 
     func testAzureMavenDenyAndApproveOnceDoNotEstablishAutoConsent() async throws {
@@ -1072,10 +1154,13 @@ final class ApprovalTests: XCTestCase {
         await assertDecision(service, azureMavenRequest(feed: "another-feed"), false)
         let presentations = await prompts.presentations
         XCTAssertEqual(presentations.count, 4)
+        XCTAssertTrue(try store.elements(type: .approvedAzureDevOpsMavenFeed).isEmpty)
+        let restartedService = try self.service()
+        await assertDecision(restartedService, r, false)
     }
 
     func testAzureMavenChecksumSidecarsRequireSupportedArtifacts() {
-        let engine = AzureDevOpsMavenApprovalEngine()
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
         let r = azureMavenRequest()
         engine.onEngineApproved(r)
         let prefix = "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/"
@@ -1103,22 +1188,26 @@ final class ApprovalTests: XCTestCase {
     }
 
     func testAzureMavenAutoValidatesPatternHeadersAndSecretNames() {
-        let engine = AzureDevOpsMavenApprovalEngine()
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
         var readOnly = azureMavenRequest()
         readOnly.headers = []
         readOnly.secrets = []
-        XCTAssertTrue(engine.isEligibleForAuto(readOnly))
+        XCTAssertFalse(engine.isEligibleForAuto(readOnly))
         let r = azureMavenRequest()
         XCTAssertFalse(engine.isEligibleForAuto(r))
         engine.onEngineApproved(r)
         XCTAssertTrue(engine.isEligibleForAuto(r))
 
-        var another = azureMavenRequest(organization: "other", feed: "other")
+        var another = azureMavenRequest()
         another.secrets = ["SECOND"]
         XCTAssertFalse(engine.isEligibleForAuto(another))
         engine.onEngineApproved(another)
         another.secrets = ["PAT", "SECOND", "PAT"]
         XCTAssertTrue(engine.isEligibleForAuto(another))
+        let restarted = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        XCTAssertTrue(restarted.isEligibleForAuto(another))
+        XCTAssertTrue(engine.isEligibleForAuto(readOnly))
+        XCTAssertTrue(restarted.isEligibleForAuto(readOnly))
         another.secrets = ["pat"]
         XCTAssertFalse(engine.isEligibleForAuto(another))
         another = r
@@ -1143,6 +1232,15 @@ final class ApprovalTests: XCTestCase {
             "pkgs.dev.azure.com/org/_packaging/feed/npm/v1/org/example/lib/1.0/lib-1.0.jar",
             "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/other-1.0.jar",
             "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar.sha999",
+            "pkgs.dev.azure.com/org//_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar",
+            "pkgs.dev.azure.com/org/../_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar",
+            "pkgs.dev.azure.com/../project/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar",
+            "pkgs.dev.azure.com/org/project/_packaging/../maven/v1/org/example/lib/1.0/lib-1.0.jar",
+            "pkgs.dev.azure.com/org/project/extra/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar",
+            "pkgs.dev.azure.com/org/project/_packaging/feed/maven/v1/org/example/lib/1.0/other-1.0.jar",
+            "pkgs.dev.azure.com/org/project/_packaging/feed/maven/v1/org/example/lib/1.0/lib-1.0.jar?extra=1",
+            "pkgs.dev.azure.com/org/project/_packaging/feed/maven/v1/../org/example/lib/1.0/lib-1.0.jar",
+            "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/org/./example/lib/1.0/lib-1.0.jar",
         ] {
             invalid = r
             invalid.url = url
@@ -1161,7 +1259,7 @@ final class ApprovalTests: XCTestCase {
     }
 
     func testAzureMavenAutoDoesNotConsumeGatesAndBypassesExhaustedSession() {
-        let engine = AzureDevOpsMavenApprovalEngine()
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
         let r = azureMavenRequest()
         engine.onEngineApproved(r)
         for _ in 0..<200 { XCTAssertTrue(engine.isEligibleForAuto(r)) }
@@ -1170,6 +1268,68 @@ final class ApprovalTests: XCTestCase {
         }
         if case .userApprovalRequired = engine.handle(r) {} else { XCTFail("Rate limit was not enforced") }
         XCTAssertTrue(engine.isEligibleForAuto(r))
+        let other = azureMavenRequest(project: "project")
+        engine.onEngineApproved(other)
+        for _ in 0..<120 {
+            if case .approved = engine.handle(other) {} else { XCTFail("Other feed's gates were consumed") }
+        }
+        if case .userApprovalRequired = engine.handle(r) {} else { XCTFail("Approving another feed reset gates") }
+        engine.onEngineApproved(r)
+        if case .approved = engine.handle(r) {} else { XCTFail("Feed reapproval did not reset its gates") }
+        if case .userApprovalRequired = engine.handle(other) {} else { XCTFail("Reapproval reset another feed's gates") }
+        XCTAssertTrue(engine.isEligibleForAuto(other))
+    }
+
+    func testAzureMavenStoreDoesNotPersistHeaderValues() throws {
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        var r = azureMavenRequest()
+        r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer sensitive-token")]
+        engine.onEngineApproved(r)
+        let elements = try store.elements(type: .approvedAzureDevOpsMavenFeed)
+        XCTAssertEqual(elements.count, 1)
+        let metadata = try XCTUnwrap(elements.first)
+        XCTAssertTrue(metadata.contains("PAT"))
+        XCTAssertTrue(metadata.contains("_packaging"))
+        XCTAssertFalse(metadata.contains("sensitive-token"))
+        XCTAssertFalse(metadata.contains("Bearer"))
+        let restarted = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        XCTAssertTrue(restarted.isEligibleForAuto(r))
+        r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer changed-token")]
+        XCTAssertFalse(restarted.isEligibleForAuto(r))
+    }
+
+    func testAzureMavenPersistenceFailureKeepsOnlyRuntimeConsent() throws {
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        try FileManager.default.removeItem(at: directory)
+        try Data("not a directory".utf8).write(to: directory)
+        let r = azureMavenRequest()
+        engine.onEngineApproved(r)
+        XCTAssertTrue(engine.isEligibleForAuto(r))
+        if case .approved = engine.handle(r) {} else { XCTFail("Runtime session was not established") }
+        let restarted = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        XCTAssertFalse(restarted.isEligibleForAuto(r))
+    }
+
+    func testRecognizedElementEnumerationValidatesMarkersAndTypes() throws {
+        try store.insert("not valid JSON", type: .approvedAzureDevOpsMavenFeed)
+        try store.insert("example.com", type: .domain)
+        let engine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        let r = azureMavenRequest()
+        XCTAssertFalse(engine.isEligibleForAuto(r))
+        engine.onEngineApproved(r)
+        XCTAssertEqual(try store.elements(type: .approvedAzureDevOpsMavenFeed).count, 2)
+        XCTAssertEqual(try store.elements(type: .domain), ["example.com"])
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        for file in files {
+            let data = try Data(contentsOf: file)
+            if String(decoding: data, as: UTF8.self).contains("_packaging") {
+                try data.write(to: directory.appendingPathComponent("wrong-hash"))
+                try Data("approvedAzureDevOpsMavenFeed\ncorrupted".utf8).write(to: file)
+            }
+        }
+        XCTAssertEqual(try store.elements(type: .approvedAzureDevOpsMavenFeed), ["not valid JSON"])
+        let restarted = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        XCTAssertFalse(restarted.isEligibleForAuto(r))
     }
 
     func testAzureMavenCanFallBackToExistingPermanentSecretRule() async throws {
