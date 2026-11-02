@@ -24,7 +24,7 @@ struct Boot {
         let proxy = Process()
         proxy.executableURL = URL(fileURLWithPath: args[4])
         proxy.arguments = [
-            "--network-fd", "0", "--listen-unix", directory.appendingPathComponent("p.sock").path,
+            "--network-fd", "0",
             "--control-unix", directory.appendingPathComponent("a.sock").path,
             "--ca-cert", directory.appendingPathComponent("ca.pem").path,
             "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),

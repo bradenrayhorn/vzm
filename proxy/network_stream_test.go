@@ -127,7 +127,11 @@ func TestHTTPStreamWebSocketUpgrade(t *testing.T) {
 	proxy, client := net.Pipe()
 	defer client.Close()
 	done := make(chan struct{})
-	go func() { defer close(done); defer proxy.Close(); serveHTTPStream(proxy, host, port, "http") }()
+	go func() {
+		defer close(done)
+		defer proxy.Close()
+		serveHTTPStreamContext(context.Background(), proxy, host, port, "http")
+	}()
 	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
 	_, _ = fmt.Fprintf(client, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", upstream.Listener.Addr())
 	reader := bufio.NewReader(client)
@@ -158,7 +162,11 @@ func TestHTTPHeaderSizeLimit(t *testing.T) {
 	proxy, client := net.Pipe()
 	defer client.Close()
 	done := make(chan struct{})
-	go func() { defer close(done); defer proxy.Close(); serveHTTPStream(proxy, "example.test", "443", "https") }()
+	go func() {
+		defer close(done)
+		defer proxy.Close()
+		serveHTTPStreamContext(context.Background(), proxy, "example.test", "443", "https")
+	}()
 	_ = client.SetDeadline(time.Now().Add(time.Second))
 	_, _ = io.WriteString(client, "GET / HTTP/1.1\r\nHost: example.test\r\nX-Large: "+strings.Repeat("x", 128*1024)+"\r\n\r\n")
 	select {

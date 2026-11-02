@@ -222,10 +222,8 @@ func nextApprovalRequestID() string {
 }
 
 func main() {
-	listenUnixPath := flag.String("listen-unix", "", "Unix domain socket path for the HTTPS proxy listener")
 	rawTCPListenUnixPath := flag.String("tcp-listen-unix", "", "Unix domain socket path for the raw TCP CONNECT proxy listener")
 	gitListenUnixPath := flag.String("git-listen-unix", "", "Unix domain socket path for the Git proxy listener")
-	listenTCPAddr := flag.String("listen-tcp", ":26604", "TCP address for the HTTPS proxy listener when --listen-unix is not set")
 	caCertPath := flag.String("ca-cert", "", "Path to write the MITM CA certificate PEM")
 	parentPID := flag.Int("parent-pid", 0, "PID of the parent vzm process; exit if it disappears")
 	networkFD := flag.Int("network-fd", -1, "Connected Unix datagram fd carrying private guest Ethernet frames")
@@ -266,17 +264,8 @@ func main() {
 		}()
 	}
 
-	listener, err := listen(*listenUnixPath, *listenTCPAddr)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer listener.Close()
-	if *listenUnixPath != "" {
-		defer os.Remove(*listenUnixPath)
-	}
-
 	if *rawTCPListenUnixPath != "" {
-		rawTCPListener, err := listen(*rawTCPListenUnixPath, "")
+		rawTCPListener, err := listenUnix(*rawTCPListenUnixPath)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -301,7 +290,7 @@ func main() {
 	}
 
 	if *gitListenUnixPath != "" {
-		gitListener, err := listen(*gitListenUnixPath, "")
+		gitListener, err := listenUnix(*gitListenUnixPath)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -316,25 +305,11 @@ func main() {
 		}()
 	}
 
-	server := &http.Server{
-		Handler: http.HandlerFunc(handleProxy),
-	}
-	go func() {
-		<-shutdownCtx.Done()
-		_ = listener.Close()
-	}()
-
-	log.Printf("proxy listening on %s", listener.Addr())
-	if err := server.Serve(listener); err != nil && shutdownCtx.Err() == nil && !errors.Is(err, net.ErrClosed) {
-		log.Fatal(err)
-	}
+	// The private network and optional raw TCP/Git listeners run independently.
+	<-shutdownCtx.Done()
 }
 
-func listen(unixPath, tcpAddr string) (net.Listener, error) {
-	if unixPath == "" {
-		return net.Listen("tcp", tcpAddr)
-	}
-
+func listenUnix(unixPath string) (net.Listener, error) {
 	_ = os.Remove(unixPath)
 	listener, err := net.Listen("unix", unixPath)
 	if err != nil {
@@ -622,27 +597,6 @@ func handleRawTCPProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleProxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodConnect {
-		http.Error(w, "Only CONNECT allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	targetHost, targetPort, err := connectTarget(r)
-	if err != nil {
-		log.Printf("blocked invalid CONNECT target %q: %v", r.Host, err)
-		http.Error(w, "Invalid CONNECT target", http.StatusBadRequest)
-		return
-	}
-	switch targetPort {
-	case "443":
-		handleHTTPSConnect(w, targetHost, targetPort)
-	default:
-		log.Printf("blocked CONNECT to unsupported port %s for %s", targetPort, targetHost)
-		http.Error(w, "CONNECT port not allowed", http.StatusForbidden)
-	}
-}
-
 func connectTarget(r *http.Request) (string, string, error) {
 	target := r.Host
 	if target == "" && r.URL != nil {
@@ -739,48 +693,8 @@ func isBlockedDestinationAddr(addr netip.Addr) bool {
 	return false
 }
 
-func handleHTTPSConnect(w http.ResponseWriter, targetHost, targetPort string) {
-	if !askForApproval(approvalRequest{Type: "CONNECT", Domain: targetHost, Method: "CONNECT", URL: net.JoinHostPort(targetHost, targetPort)}).Approved {
-		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
-		return
-	}
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		return
-	}
-	defer clientConn.Close()
-
-	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-
-	cert, err := generateFakeCertForDomain(targetHost)
-	if err != nil {
-		log.Println("Error generating certificate:", err)
-		return
-	}
-	tlsConn := tls.Server(clientConn, &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"http/1.1"},
-	})
-	if err := tlsConn.Handshake(); err != nil {
-		return
-	}
-	defer tlsConn.Close()
-
-	serveHTTPStream(tlsConn, targetHost, targetPort, "https")
-}
-
-// Shared by explicit CONNECT and private-NIC connections: identical request
-// approvals, secret substitution, streaming, redirects, and WebSocket policy.
-func serveHTTPStream(conn net.Conn, targetHost, targetPort, scheme string) {
-	serveHTTPStreamContext(shutdownCtx, conn, targetHost, targetPort, scheme)
-}
-
+// HTTP request approvals, secret substitution, streaming, redirects, and
+// WebSocket policy for connections accepted by the private network.
 func serveHTTPStreamContext(ctx context.Context, conn net.Conn, targetHost, targetPort, scheme string) {
 	headerReader := &httpHeaderReader{Reader: conn}
 	bufReader := bufio.NewReader(headerReader)
@@ -842,7 +756,7 @@ func serveHTTPRequest(conn net.Conn, bufReader *bufio.Reader, innerReq *http.Req
 		return false
 	}
 	if !hostHeaderMatches(innerReq.Host, targetHost, targetPort) {
-		log.Printf("Domain fronting detected! CONNECT: %s, Host: %s", net.JoinHostPort(targetHost, targetPort), innerReq.Host)
+		log.Printf("Domain fronting detected! target: %s, Host: %s", net.JoinHostPort(targetHost, targetPort), innerReq.Host)
 		return false
 	}
 
@@ -853,8 +767,7 @@ func serveHTTPRequest(conn net.Conn, bufReader *bufio.Reader, innerReq *http.Req
 		return false
 	}
 
-	// The old explicit proxy only admitted HTTPS CONNECTs. Supporting ordinary
-	// HTTP must not silently send host-held secrets over an unencrypted link.
+	// Never send host-held secrets over an unencrypted link.
 	if scheme != "https" && len(secretNames) != 0 {
 		_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return false
@@ -928,7 +841,7 @@ func writeProxyResponse(w io.Writer, resp *http.Response) error {
 	// Transport can transparently decompress a length-delimited gzip response,
 	// removing Content-Length without adding Transfer-Encoding. Response.Write
 	// does not choose chunked framing for us (and treats Uncompressed specially).
-	// Without explicit framing, clients wait for EOF while our CONNECT loop
+	// Without explicit framing, clients wait for EOF while our HTTP stream loop
 	// waits for their next request. Reframe unknown-length persistent bodies
 	// as chunks, preserving incremental delivery for SSE/MCP responses.
 	bodyAllowed := resp.StatusCode >= 200 && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified
