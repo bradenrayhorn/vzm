@@ -183,38 +183,45 @@ struct ApprovalModeMenuView: View {
 class ApprovalCoordinator: NSObject, NSWindowDelegate {
     static let shared = ApprovalCoordinator()
 
-    private struct QueuedApproval {
+    private struct ActiveApproval {
+        let id: UUID
         let request: ApprovalCoordinatorRequest
         let continuation: CheckedContinuation<ApprovalCoordinatorResult, Never>
     }
 
-    private let maxPendingApprovals = 64
-    private var activeApproval: QueuedApproval?
-    private var queuedApprovals: [QueuedApproval] = []
+    // ApprovalService owns queuing and capacity. This coordinator only presents
+    // its single active request and completes dismissal before returning.
+    private var activeApproval: ActiveApproval?
     private var popupWindow: NSWindow?
 
     func askForApproval(request: ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult {
-        await withCheckedContinuation { continuation in
-            let pendingCount = queuedApprovals.count + (activeApproval == nil ? 0 : 1)
-            guard pendingCount < maxPendingApprovals else {
-                continuation.resume(returning: .deny)
-                return
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            guard !Task.isCancelled else { return .deny }
+            return await withCheckedContinuation { continuation in
+                guard activeApproval == nil else {
+                    continuation.resume(returning: .deny)
+                    return
+                }
+                activeApproval = ActiveApproval(id: id, request: request, continuation: continuation)
+                showPopupWindow()
             }
-
-            queuedApprovals.append(QueuedApproval(request: request, continuation: continuation))
-            showNextApprovalIfIdle()
+        } onCancel: {
+            Task { @MainActor in
+                self.finishActiveApproval(id: id, result: .deny, closeWindow: true)
+            }
         }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if sender === popupWindow, activeApproval != nil {
-            finishActiveApproval(result: .deny, closeWindow: false)
+        if sender === popupWindow, let activeApproval {
+            finishActiveApproval(id: activeApproval.id, result: .deny, closeWindow: false)
         }
         return true
     }
 
-    private func finishActiveApproval(result: ApprovalCoordinatorResult, closeWindow: Bool) {
-        guard let activeApproval else {
+    private func finishActiveApproval(id: UUID, result: ApprovalCoordinatorResult, closeWindow: Bool) {
+        guard let activeApproval, activeApproval.id == id else {
             return
         }
 
@@ -229,22 +236,13 @@ class ApprovalCoordinator: NSObject, NSWindowDelegate {
         }
 
         continuation.resume(returning: result)
-        showNextApprovalIfIdle()
-    }
-
-    private func showNextApprovalIfIdle() {
-        guard activeApproval == nil, !queuedApprovals.isEmpty else {
-            return
-        }
-
-        activeApproval = queuedApprovals.removeFirst()
-        showPopupWindow()
     }
 
     private func showPopupWindow() {
-        guard let request = self.activeApproval?.request else { return }
-        let promptView = ApprovalPromptView(request: request) { [weak self] result in
-            self?.finishActiveApproval(result: result, closeWindow: true)
+        guard let activeApproval else { return }
+        let id = activeApproval.id
+        let promptView = ApprovalPromptView(request: activeApproval.request) { [weak self] result in
+            self?.finishActiveApproval(id: id, result: result, closeWindow: true)
         }
         
         let hostingController = NSHostingController(rootView: promptView)

@@ -43,8 +43,15 @@ actor ApprovalService {
     private let engines: [any ApprovalEngine]
     private let modeState: ApprovalModeState
     private let promptUser: (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult
+    private struct ApprovalWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    // Includes the displayed approval, not just requests waiting behind it.
+    private let maxPendingApprovals: Int
     private var approvalInProgress = false
-    private var approvalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var approvalWaiters: [ApprovalWaiter] = []
 
     init(
         fileManager: FileManager = .default,
@@ -52,6 +59,7 @@ actor ApprovalService {
         engines: [any ApprovalEngine]? = nil,
         recognizedElementStore: RecognizedElementStore? = nil,
         modeState: ApprovalModeState = .shared,
+        maxPendingApprovals: Int = 64,
         promptUser: @escaping (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult = {
             await ApprovalCoordinator.shared.askForApproval(request: $0)
         }
@@ -59,6 +67,7 @@ actor ApprovalService {
         let recognizedElementStore = try recognizedElementStore ?? RecognizedElementStore(fileManager: fileManager)
         self.recognizedElementStore = recognizedElementStore
         self.modeState = modeState
+        self.maxPendingApprovals = max(0, maxPendingApprovals)
         self.promptUser = promptUser
         self.denyRules = denyRules ?? [
             DenyTrackingRule(),
@@ -82,6 +91,7 @@ actor ApprovalService {
     }
 
     func askForApproval(request: ProxyApprovalRequest) async -> Bool {
+        guard !Task.isCancelled else { return false }
         switch evaluate(request: request) {
         case let .approved(request, reason):
             Self.logDecision(true, request: request, reason: reason)
@@ -93,8 +103,12 @@ actor ApprovalService {
             break
         }
 
-        await waitForApprovalTurn()
+        guard await waitForApprovalTurn() else {
+            Self.logDecision(false, request: request, reason: "approval queue full or cancelled")
+            return false
+        }
         defer { finishApprovalTurn() }
+        guard !Task.isCancelled else { return false }
 
         switch evaluate(request: request) {
         case let .approved(request, reason):
@@ -196,6 +210,9 @@ actor ApprovalService {
         var request = pendingApproval.request
         let presentation = buildPromptPresentation(for: pendingApproval)
         let action = await promptUser(ApprovalCoordinatorRequest(presentation: presentation))
+        // A cancelled prompt must never establish consent, even if a UI action
+        // raced with cancellation or a presenter returned approval on cancellation.
+        guard !Task.isCancelled else { return false }
         guard action != .approveEngine || pendingApproval.selectedEngine != nil else { return false }
 
         if action.isApproved && pendingApproval.userAgents.count > pendingApproval.knownUserAgents.count {
@@ -267,15 +284,31 @@ actor ApprovalService {
         return actions
     }
 
-    private func waitForApprovalTurn() async {
-        if !approvalInProgress {
-            approvalInProgress = true
-            return
-        }
+    private func waitForApprovalTurn() async -> Bool {
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            guard !Task.isCancelled,
+                  approvalWaiters.count + (approvalInProgress ? 1 : 0) < maxPendingApprovals else {
+                return false
+            }
+            if !approvalInProgress {
+                approvalInProgress = true
+                return true
+            }
 
-        await withCheckedContinuation { continuation in
-            approvalWaiters.append(continuation)
+            return await withCheckedContinuation { continuation in
+                approvalWaiters.append(ApprovalWaiter(id: id, continuation: continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: id) }
         }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        // A promoted waiter owns the turn until its defer releases it. Its
+        // caller checks cancellation before reevaluation/presentation instead.
+        guard let index = approvalWaiters.firstIndex(where: { $0.id == id }) else { return }
+        approvalWaiters.remove(at: index).continuation.resume(returning: false)
     }
 
     private func finishApprovalTurn() {
@@ -284,7 +317,7 @@ actor ApprovalService {
             return
         }
 
-        approvalWaiters.removeFirst().resume()
+        approvalWaiters.removeFirst().continuation.resume(returning: true)
     }
 }
 

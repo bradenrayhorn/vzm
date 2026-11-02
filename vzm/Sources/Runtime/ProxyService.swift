@@ -301,8 +301,8 @@ private struct ProxyApprovalResponse: Codable, Sendable {
     let substitutions: [String: String]
 }
 
-private func proxyApprovalResponse(for request: ProxyApprovalRequest) async -> ProxyApprovalResponse {
-    guard await ApprovalService.shared.askForApproval(request: request) else {
+private func proxyApprovalResponse(for request: ProxyApprovalRequest, approved: Bool) -> ProxyApprovalResponse {
+    guard approved, !Task.isCancelled else {
         return ProxyApprovalResponse(id: request.id, approved: false, substitutions: [:])
     }
 
@@ -352,16 +352,24 @@ private func resolveSecretSubstitutions(for request: ProxyApprovalRequest) throw
     return substitutions
 }
 
-private final class ApprovalControlHandler: ChannelInboundHandler {
+final class ApprovalControlHandler: ChannelInboundHandler {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
 
     private var buffer: ByteBuffer?
     private var handled = false
     private let activityRecorder: ProxyActivityRecorder
+    private let approve: (ProxyApprovalRequest) async -> Bool
+    private var approvalTask: Task<Void, Never>?
 
-    init(activityRecorder: ProxyActivityRecorder) {
+    init(
+        activityRecorder: ProxyActivityRecorder,
+        approve: @escaping (ProxyApprovalRequest) async -> Bool = {
+            await ApprovalService.shared.askForApproval(request: $0)
+        }
+    ) {
         self.activityRecorder = activityRecorder
+        self.approve = approve
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -379,15 +387,11 @@ private final class ApprovalControlHandler: ChannelInboundHandler {
         }
 
         let length = newlineIndex - buffer.readerIndex
-        guard let line = buffer.readString(length: length) else {
-            context.close(promise: nil)
-            return
-        }
-        _ = buffer.readInteger(as: UInt8.self)
-        self.buffer = buffer
+        let requestData = buffer.readBytes(length: length).map { Data($0) }
+        self.buffer = nil
         handled = true
 
-        guard let requestData = line.data(using: .utf8) else {
+        guard let requestData else {
             context.close(promise: nil)
             return
         }
@@ -407,9 +411,12 @@ private final class ApprovalControlHandler: ChannelInboundHandler {
         // for a decision (including auto-approvals and denials).
         activityRecorder.recordAttempt()
 
+        // The promise hops back to the event loop before inspecting channel
+        // state or writing. It always succeeds, including after cancellation.
         let approvalPromise = context.eventLoop.makePromise(of: ProxyApprovalResponse.self)
-        approvalPromise.futureResult.whenComplete { result in
-            let response = (try? result.get()) ?? ProxyApprovalResponse(id: request.id, approved: false, substitutions: [:])
+        approvalPromise.futureResult.whenSuccess { response in
+            guard self.approvalTask != nil, context.channel.isActive else { return }
+            self.approvalTask = nil
             guard let responseData = try? JSONEncoder().encode(response) else {
                 context.close(promise: nil)
                 return
@@ -422,14 +429,29 @@ private final class ApprovalControlHandler: ChannelInboundHandler {
                 context.close(promise: nil)
             }
         }
-
-        Task {
-            let response = await proxyApprovalResponse(for: request)
-            approvalPromise.succeed(response)
+        approvalTask = Task {
+            let approved = await approve(request)
+            approvalPromise.succeed(proxyApprovalResponse(for: request, approved: approved))
         }
     }
 
+    private func cancelApproval() {
+        approvalTask?.cancel()
+        approvalTask = nil
+        buffer = nil
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        cancelApproval()
+        context.fireChannelInactive()
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        cancelApproval()
+    }
+
     func errorCaught(context: ChannelHandlerContext, error: Error) {
+        cancelApproval()
         context.close(promise: nil)
     }
 }
