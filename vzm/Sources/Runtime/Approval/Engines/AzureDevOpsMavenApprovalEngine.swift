@@ -24,9 +24,6 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
     private var approvedFeeds: [String: Consent] = [:]
 
     private static let host = "pkgs.dev.azure.com"
-    private static let pathRegex = try! NSRegularExpression(
-        pattern: #"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+$"#
-    )
 
     init(recognizedElementStore: RecognizedElementStore) {
         self.recognizedElementStore = recognizedElementStore
@@ -130,7 +127,7 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
 
         let prefixLength = packagingIndex + 4
         let artifactPath = parts.dropFirst(prefixLength).joined(separator: "/")
-        guard isMavenArtifactPath(artifactPath) else {
+        guard MavenArtifactPath.matches(artifactPath) else {
             return nil
         }
 
@@ -143,55 +140,5 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
                 (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte)
                     || byte == 45 || byte == 46 || byte == 95
             }
-    }
-
-    private func isMavenArtifactPath(_ path: String) -> Bool {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count >= 4 else {
-            return false
-        }
-
-        let version = parts[parts.count - 2]
-        let filename = parts[parts.count - 1]
-        let artifact = parts[parts.count - 3]
-        let groupParts = Array(parts.dropLast(3))
-
-        guard !version.isEmpty, !artifact.isEmpty, !filename.isEmpty, !groupParts.contains(where: \.isEmpty),
-              !parts.contains(where: { $0 == "." || $0 == ".." })
-        else {
-            return false
-        }
-        guard Self.matchesPathCharacters(path) else {
-            return false
-        }
-
-        return Self.matchesArtifactFilename(filename, artifact: artifact, version: version)
-    }
-
-    private static func matchesPathCharacters(_ path: String) -> Bool {
-        let range = NSRange(path.startIndex..<path.endIndex, in: path)
-        return pathRegex.firstMatch(in: path, range: range) != nil
-    }
-
-    private static func matchesArtifactFilename(_ filename: String, artifact: String, version: String) -> Bool {
-        // Checksum sidecars must still name a supported artifact, not an arbitrary file.
-        var filename = filename
-        if let checksum = ["sha1", "md5", "sha256", "sha512"].first(where: { filename.hasSuffix(".\($0)") }) {
-            filename = String(filename.dropLast(checksum.count + 1))
-        }
-        guard let dot = filename.lastIndex(of: ".") else {
-            return false
-        }
-
-        let base = String(filename[..<dot])
-        let ext = String(filename[filename.index(after: dot)...])
-        guard ["pom", "module", "jar"].contains(ext) else {
-            return false
-        }
-        guard base == "\(artifact)-\(version)" || base.hasPrefix("\(artifact)-\(version)-") else {
-            return false
-        }
-
-        return true
     }
 }

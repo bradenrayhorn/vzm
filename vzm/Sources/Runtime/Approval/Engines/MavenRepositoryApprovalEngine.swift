@@ -9,10 +9,6 @@ final class MavenRepositoryApprovalEngine: PatternApprovalEngine {
         "repo.maven.apache.org",
     ]
 
-    private static let pathRegex = try! NSRegularExpression(
-        pattern: #"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+$"#
-    )
-
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         request.type == "REQUEST"
             && request.secrets.isEmpty
@@ -41,38 +37,17 @@ final class MavenRepositoryApprovalEngine: PatternApprovalEngine {
             guard remainder.hasPrefix("maven2/") else {
                 return false
             }
-            return isMavenArtifactPath(String(remainder.dropFirst("maven2/".count)))
+            return MavenArtifactPath.matches(String(remainder.dropFirst("maven2/".count)))
         case "plugins.gradle.org":
             guard remainder.hasPrefix("m2/") else {
                 return false
             }
-            return isMavenArtifactPath(String(remainder.dropFirst("m2/".count)))
+            return MavenArtifactPath.matches(String(remainder.dropFirst("m2/".count)))
         case "plugins-artifacts.gradle.org":
             return isPluginArtifactPath(remainder)
         default:
             return false
         }
-    }
-
-    private func isMavenArtifactPath(_ path: String) -> Bool {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count >= 4 else {
-            return false
-        }
-
-        let version = parts[parts.count - 2]
-        let filename = parts[parts.count - 1]
-        let artifact = parts[parts.count - 3]
-        let groupParts = Array(parts.dropLast(3))
-
-        guard !version.isEmpty, !artifact.isEmpty, !filename.isEmpty, !groupParts.contains(where: \.isEmpty) else {
-            return false
-        }
-        guard Self.matchesPathCharacters(path) else {
-            return false
-        }
-
-        return Self.matchesArtifactFilename(filename, artifact: artifact, version: version)
     }
 
     private func isPluginArtifactPath(_ path: String) -> Bool {
@@ -90,36 +65,14 @@ final class MavenRepositoryApprovalEngine: PatternApprovalEngine {
         guard !version.isEmpty, !artifact.isEmpty, !filename.isEmpty, !groupParts.contains(where: \.isEmpty) else {
             return false
         }
-        guard Self.matchesPathCharacters(path) else {
+        guard MavenArtifactPath.isValidPath(path) else {
             return false
         }
         guard Self.isHex(hash) && hash.count >= 32 else {
             return false
         }
 
-        return Self.matchesArtifactFilename(filename, artifact: artifact, version: version)
-    }
-
-    private static func matchesPathCharacters(_ path: String) -> Bool {
-        let range = NSRange(path.startIndex..<path.endIndex, in: path)
-        return pathRegex.firstMatch(in: path, range: range) != nil
-    }
-
-    private static func matchesArtifactFilename(_ filename: String, artifact: String, version: String) -> Bool {
-        guard let dot = filename.lastIndex(of: ".") else {
-            return false
-        }
-
-        let base = String(filename[..<dot])
-        let ext = String(filename[filename.index(after: dot)...])
-        guard ["pom", "module", "jar"].contains(ext) else {
-            return false
-        }
-        guard base == "\(artifact)-\(version)" || base.hasPrefix("\(artifact)-\(version)-") else {
-            return false
-        }
-
-        return true
+        return MavenArtifactPath.matchesArtifactFilename(filename, artifact: artifact, version: version)
     }
 
     private static func isHex(_ string: String) -> Bool {

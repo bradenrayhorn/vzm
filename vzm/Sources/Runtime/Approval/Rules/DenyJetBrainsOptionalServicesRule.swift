@@ -6,7 +6,7 @@ final class DenyJetBrainsOptionalServicesRule: DenyRule {
     var name: String { "DenyJetBrainsOptionalServices" }
 
     func matches(_ request: ProxyApprovalRequest) -> Bool {
-        let domain = Self.normalizedDomain(request.domain)
+        let domain = DomainName.normalize(request.domain)
 
         // Blocking CONNECT here avoids a second prompt for the inner AI request.
         if domain == "api.jetbrains.ai" {
@@ -25,16 +25,5 @@ final class DenyJetBrainsOptionalServicesRule: DenyRule {
         }
 
         return false
-    }
-
-    private static func normalizedDomain(_ domain: String) -> String {
-        var normalized = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if normalized.hasSuffix(".") {
-            normalized.removeLast()
-        }
-        if let colon = normalized.lastIndex(of: ":") {
-            normalized = String(normalized[..<colon])
-        }
-        return normalized
     }
 }

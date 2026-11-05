@@ -251,6 +251,24 @@ final class ApprovalTests: XCTestCase {
         }
     }
 
+    func testDenyDomainNormalizationPreservesOperationOrder() {
+        let cases: [(any DenyRule, String)] = [
+            (DenyTrackingRule(), "telemetry.nextjs.org"),
+            (DenyTrackingRule(), "config.liquibase.com"),
+            (DenyJetBrainsOptionalServicesRule(), "api.jetbrains.ai"),
+        ]
+        for (rule, domain) in cases {
+            for (suffix, expected) in [
+                ("", true), (".", true), (":443", true), (":443.", true),
+                (".:443", false), ("..", false), (".example.com", false),
+            ] {
+                var r = request()
+                r.domain = " \n" + domain.uppercased() + suffix + "\t"
+                XCTAssertEqual(rule.matches(r), expected, "\(rule.name): \(r.domain)")
+            }
+        }
+    }
+
     func testDenyRulesRunInOrderAndStopBeforeAnyApprovalInEveryMode() async throws {
         var calls: [String] = []
         let miss = DenyRuleObserver { _ in calls.append("miss") }
@@ -1182,6 +1200,111 @@ final class ApprovalTests: XCTestCase {
         XCTAssertNil(permanent.keyboardShortcut)
         XCTAssertEqual(presentation.actions.first { $0.id == .approveOnce }?.keyboardShortcut, .defaultAction)
         XCTAssertEqual(presentation.actions.first { $0.id == .deny }?.keyboardShortcut, .cancelAction)
+    }
+
+    func testMavenArtifactValidationAcceptsArtifactsAndChecksumSidecars() {
+        let publicEngine = MavenRepositoryApprovalEngine()
+        let azureEngine = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
+        let publicPrefixes = ["repo.maven.apache.org/maven2/", "plugins.gradle.org/m2/"]
+        let azurePrefix = "pkgs.dev.azure.com/org/_packaging/feed/maven/v1/"
+        for filename in ["lib-1.0.pom", "lib-1.0.module", "lib-1.0.jar", "lib-1.0-sources.jar"] {
+            for suffix in ["", ".sha1", ".md5", ".sha256", ".sha512"] {
+                for method in ["GET", "HEAD"] {
+                    let path = "org/example/lib/1.0/" + filename + suffix
+                    for prefix in publicPrefixes {
+                        XCTAssertTrue(publicEngine.matches(request(prefix + path, method: method)), path)
+                    }
+                    let azure = request(azurePrefix + path, method: method)
+                    if case .needsConsent = azureEngine.evaluate(azure) {} else { XCTFail(path) }
+                }
+            }
+        }
+        for path in [
+            "org/example/lib/1.0/other-1.0.jar", "org/example/lib/1.0/lib-2.0.jar",
+            "org/example/lib/1.0/lib-1.0.txt", "org/example/lib/1.0/lib-1.0.JAR",
+            "org/example/lib/1.0/lib-1.0.jar.asc", "org/example/lib/1.0/lib-1.0.jar.sha999",
+            "org/example/lib/1.0/lib-1.0.jar.sha1.sha1", "org//lib/1.0/lib-1.0.jar",
+            "lib/1.0/lib-1.0.jar", "org/example/lib/1.0/", "/org/example/lib/1.0/lib-1.0.jar",
+            "org/%65xample/lib/1.0/lib-1.0.jar", "org/example/lib/1.0/lib-1.0.jar?x=1",
+            "org/example/lib/1.0/lib-1.0.jar#fragment",
+        ] {
+            for prefix in publicPrefixes {
+                XCTAssertFalse(publicEngine.matches(request(prefix + path)), path)
+            }
+            if case .notApplicable = azureEngine.evaluate(request(azurePrefix + path)) {} else { XCTFail(path) }
+        }
+        for segment in [".", ".."] {
+            for path in [
+                "\(segment)/example/lib/1.0/lib-1.0.jar",
+                "org/\(segment)/lib/1.0/lib-1.0.jar",
+                "org/example/\(segment)/1.0/\(segment)-1.0.jar",
+                "org/example/lib/\(segment)/lib-\(segment).jar",
+            ] {
+                for prefix in publicPrefixes {
+                    XCTAssertFalse(publicEngine.matches(request(prefix + path)), path)
+                }
+                if case .notApplicable = azureEngine.evaluate(request(azurePrefix + path)) {} else { XCTFail(path) }
+            }
+        }
+    }
+
+    func testMavenRepositoryKeepsExactURLMatchingAndCrossRepositoryHeaderConsent() {
+        let engine = MavenRepositoryApprovalEngine()
+        var r = request("repo.maven.apache.org/maven2/org/example/lib/1.0/lib-1.0.jar")
+        r.headers = [ProxyApprovalHeader(name: "X-Build", value: "build")]
+        engine.onEngineApproved(r)
+        r.url = "plugins.gradle.org/m2/org/example/lib/1.0/lib-1.0.jar"
+        XCTAssertTrue(engine.evaluate(r).isApproved)
+        r.headers[0].value = "changed"
+        XCTAssertFalse(engine.evaluate(r).isApproved)
+
+        let url = "repo.maven.apache.org/maven2/org/example/lib/1.0/lib-1.0.jar"
+        XCTAssertTrue(engine.matches(request(" \n" + url + "\t")))
+        for invalid in [
+            url.replacingOccurrences(of: "repo.maven.apache.org", with: "REPO.MAVEN.APACHE.ORG"),
+            url.replacingOccurrences(of: "repo.maven.apache.org", with: "repo.maven.apache.org:443"),
+            "https://" + url,
+        ] {
+            XCTAssertFalse(engine.matches(request(invalid)), invalid)
+        }
+        var invalid = request(url)
+        invalid.secrets = ["PAT"]
+        XCTAssertFalse(engine.matches(invalid))
+        invalid = request(url, method: "POST")
+        XCTAssertFalse(engine.matches(invalid))
+        invalid = request(url, type: "CONNECT")
+        XCTAssertFalse(engine.matches(invalid))
+        invalid = request(url)
+        invalid.body = ProxyApprovalBody(text: "", warning: "")
+        XCTAssertFalse(engine.matches(invalid))
+    }
+
+    func testGradlePluginArtifactValidationRetainsHashLayout() {
+        let engine = MavenRepositoryApprovalEngine()
+        let hash = String(repeating: "a", count: 32)
+        let prefix = "plugins-artifacts.gradle.org/org/example/lib/1.0/"
+        for ext in ["pom", "module", "jar"] {
+            for suffix in ["", ".sha1", ".md5", ".sha256", ".sha512"] {
+                XCTAssertTrue(engine.matches(request(prefix + hash + "/lib-1.0." + ext + suffix)))
+            }
+        }
+        for segment in [".", ".."] {
+            for path in [
+                "org/\(segment)/lib/1.0/\(hash)/lib-1.0.jar",
+                "org/example/\(segment)/1.0/\(hash)/\(segment)-1.0.jar",
+                "org/example/lib/\(segment)/\(hash)/lib-\(segment).jar",
+            ] {
+                XCTAssertFalse(engine.matches(request("plugins-artifacts.gradle.org/" + path)), path)
+            }
+        }
+        for path in [
+            String(hash.dropLast()) + "/lib-1.0.jar", "not-a-hash/lib-1.0.jar",
+            hash + "/other-1.0.jar", hash + "/lib-1.0.txt", "lib-1.0.jar",
+            hash + "/other-1.0.jar.sha1", hash + "/lib-1.0.txt.sha1",
+            hash + "/lib-1.0.jar.sha1.sha256", hash + "/lib-1.0.jar.sha999",
+        ] {
+            XCTAssertFalse(engine.matches(request(prefix + path)), path)
+        }
     }
 
     func testAzureMavenPromptTakesPrecedenceOverSecretRequestPrompt() async throws {

@@ -9,20 +9,6 @@ final class DenyTrackingRule: DenyRule {
     ]
 
     func matches(_ request: ProxyApprovalRequest) -> Bool {
-        Self.blockedDomains.contains(Self.normalizedDomain(request.domain))
-    }
-
-    private static func normalizedDomain(_ domain: String) -> String {
-        var normalized = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-
-        if normalized.hasSuffix(".") {
-            normalized.removeLast()
-        }
-
-        if let colon = normalized.lastIndex(of: ":") {
-            normalized = String(normalized[..<colon])
-        }
-
-        return normalized
+        Self.blockedDomains.contains(DomainName.normalize(request.domain))
     }
 }
