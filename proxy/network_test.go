@@ -43,7 +43,7 @@ type testGuest struct {
 	stack *stack.Stack
 }
 
-func newTestGuest(t *testing.T) *testGuest {
+func newTestGuest(t *testing.T, configure ...func(*virtualNetwork)) *testGuest {
 	t.Helper()
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
 	if err != nil {
@@ -61,6 +61,9 @@ func newTestGuest(t *testing.T) *testGuest {
 	if err != nil {
 		unix.Close(fds[1])
 		t.Fatal(err)
+	}
+	for _, apply := range configure {
+		apply(host)
 	}
 	file := os.NewFile(uintptr(fds[1]), "test-guest")
 	wire, err := net.FileConn(file)
@@ -392,15 +395,13 @@ func TestPrivateNetworkDenialAndIdentity(t *testing.T) {
 	}
 }
 
-func TestPrivateNetworkOnlyMediatedTraffic(t *testing.T) {
+func TestPrivateNetworkRejectsUnsafeDestinations(t *testing.T) {
 	guest := newTestGuest(t)
-	ip, _ := guest.host.dns.address("example.test")
 	for _, target := range []struct {
 		ip   string
 		port uint16
 	}{
-		{netip.AddrFrom4(ip).String(), 80}, {"8.8.8.8", 80},
-		{netip.AddrFrom4(ip).String(), 22}, {netip.AddrFrom4(ip).String(), 5432},
+		{"127.0.0.1", 5432}, {"169.254.169.254", 5432}, {"198.18.100.100", 5432},
 		{"127.0.0.1", 443}, {"10.0.0.1", 443}, {"169.254.169.254", 443}, {"198.18.100.100", 443},
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)

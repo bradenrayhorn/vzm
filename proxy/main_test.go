@@ -1,16 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
@@ -37,40 +33,6 @@ func TestIsAllowedDestinationAddr(t *testing.T) {
 			addr := netip.MustParseAddr(tt.addr)
 			if got := isAllowedDestinationAddr(addr); got != tt.allowed {
 				t.Fatalf("isAllowedDestinationAddr(%s) = %v, want %v", tt.addr, got, tt.allowed)
-			}
-		})
-	}
-}
-
-func TestIsAllowedRawTCPDestinationAddr(t *testing.T) {
-	tests := []struct {
-		name    string
-		addr    string
-		allowed bool
-	}{
-		{name: "public ipv4", addr: "8.8.8.8", allowed: true},
-		{name: "private 10", addr: "10.20.30.40", allowed: true},
-		{name: "private 172", addr: "172.20.30.40", allowed: true},
-		{name: "private 192", addr: "192.168.1.20", allowed: true},
-		{name: "carrier grade NAT", addr: "100.64.1.20", allowed: true},
-		{name: "ipv6 unique local", addr: "fd00::20", allowed: true},
-		{name: "mapped private ipv4", addr: "::ffff:10.20.30.40", allowed: true},
-		{name: "loopback ipv4", addr: "127.0.0.1", allowed: false},
-		{name: "loopback ipv6", addr: "::1", allowed: false},
-		{name: "link local ipv4", addr: "169.254.1.20", allowed: false},
-		{name: "link local ipv6", addr: "fe80::20", allowed: false},
-		{name: "documentation ipv4", addr: "192.0.2.20", allowed: false},
-		{name: "documentation ipv6", addr: "2001:db8::20", allowed: false},
-		{name: "multicast ipv4", addr: "224.0.0.1", allowed: false},
-		{name: "unspecified ipv4", addr: "0.0.0.0", allowed: false},
-		{name: "scoped private ipv6", addr: "fd00::20%lo0", allowed: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			addr := netip.MustParseAddr(tt.addr)
-			if got := isAllowedRawTCPDestinationAddr(addr); got != tt.allowed {
-				t.Fatalf("isAllowedRawTCPDestinationAddr(%s) = %v, want %v", tt.addr, got, tt.allowed)
 			}
 		})
 	}
@@ -115,162 +77,6 @@ func TestRejectBlockedDialDestination(t *testing.T) {
 				t.Fatalf("rejectBlockedDialDestination() unexpected error: %v", err)
 			}
 		})
-	}
-}
-
-func TestRejectUnsafeRawTCPDialDestination(t *testing.T) {
-	tests := []struct {
-		name    string
-		address string
-		blocked bool
-	}{
-		{name: "public", address: "8.8.8.8:5432"},
-		{name: "private", address: "10.20.30.40:5432"},
-		{name: "carrier grade NAT", address: "100.64.1.20:5432"},
-		{name: "unique local", address: "[fd00::20]:5432"},
-		{name: "loopback", address: "127.0.0.1:5432", blocked: true},
-		{name: "link local", address: "169.254.1.20:5432", blocked: true},
-		{name: "reserved", address: "192.0.2.20:5432", blocked: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := rejectUnsafeRawTCPDialDestination(context.Background(), "tcp", tt.address, nil)
-			if tt.blocked {
-				if !errors.Is(err, errBlockedDestination) {
-					t.Fatalf("rejectUnsafeRawTCPDialDestination() error = %v, want %v", err, errBlockedDestination)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("rejectUnsafeRawTCPDialDestination() unexpected error: %v", err)
-			}
-		})
-	}
-}
-
-func TestConnectTarget(t *testing.T) {
-	tests := []struct {
-		target   string
-		wantHost string
-		wantPort string
-		wantErr  bool
-	}{
-		{target: "DB.Example.COM.:5432", wantHost: "db.example.com", wantPort: "5432"},
-		{target: "[2606:4700:4700::1111]:3306", wantHost: "2606:4700:4700::1111", wantPort: "3306"},
-		{target: "db.example.com:0", wantErr: true},
-		{target: "db.example.com:65536", wantErr: true},
-		{target: "db.example.com:postgres", wantErr: true},
-		{target: "db.example.com", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.target, func(t *testing.T) {
-			host, port, err := connectTarget(&http.Request{Host: tt.target})
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("connectTarget() error = nil, want error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if host != tt.wantHost || port != tt.wantPort {
-				t.Fatalf("connectTarget() = %q, %q; want %q, %q", host, port, tt.wantHost, tt.wantPort)
-			}
-		})
-	}
-}
-
-func TestRawTCPProxyRejectsNonConnect(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	handleRawTCPProxy(recorder, httptest.NewRequest(http.MethodGet, "http://db.example.com:5432", nil))
-	if recorder.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusMethodNotAllowed)
-	}
-}
-
-func TestRawTCPProxyRequiresApproval(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodConnect, "http://db.example.com:5432", nil)
-	request.Host = "db.example.com:5432"
-	handleRawTCPProxy(recorder, request)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
-	}
-}
-
-func TestRawTCPProxyTunnelsBytes(t *testing.T) {
-	oldApproval := rawTCPAskForApproval
-	oldDial := rawTCPDialContext
-	defer func() {
-		rawTCPAskForApproval = oldApproval
-		rawTCPDialContext = oldDial
-	}()
-
-	upstreamProxy, upstreamServer := net.Pipe()
-	rawTCPAskForApproval = func(request approvalRequest) approvalResponse {
-		if request.Type != "TCP_CONNECT" || request.Domain != "db.example.com" || request.URL != "db.example.com:5432" {
-			t.Errorf("unexpected approval request: %#v", request)
-		}
-		return approvalResponse{Approved: true}
-	}
-	rawTCPDialContext = func(_ context.Context, network, address string) (net.Conn, error) {
-		if network != "tcp" || address != "db.example.com:5432" {
-			t.Errorf("unexpected dial: %s %s", network, address)
-		}
-		return upstreamProxy, nil
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(handleRawTCPProxy))
-	defer server.Close()
-	client, err := net.Dial("tcp", server.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-
-	upstreamDone := make(chan error, 1)
-	go func() {
-		defer upstreamServer.Close()
-		payload := make([]byte, 4)
-		if _, err := io.ReadFull(upstreamServer, payload); err != nil {
-			upstreamDone <- err
-			return
-		}
-		if string(payload) != "ping" {
-			upstreamDone <- fmt.Errorf("upstream received %q", payload)
-			return
-		}
-		_, err := upstreamServer.Write([]byte("pong"))
-		upstreamDone <- err
-	}()
-
-	request := &http.Request{Method: http.MethodConnect}
-	if _, err := fmt.Fprint(client, "CONNECT db.example.com:5432 HTTP/1.1\r\nHost: db.example.com:5432\r\n\r\n"); err != nil {
-		t.Fatal(err)
-	}
-	reader := bufio.NewReader(client)
-	response, err := http.ReadResponse(reader, request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
-	}
-	if _, err := client.Write([]byte("ping")); err != nil {
-		t.Fatal(err)
-	}
-	payload := make([]byte, 4)
-	if _, err := io.ReadFull(reader, payload); err != nil {
-		t.Fatal(err)
-	}
-	if string(payload) != "pong" {
-		t.Fatalf("client received %q, want pong", payload)
-	}
-	if err := <-upstreamDone; err != nil {
-		t.Fatal(err)
 	}
 }
 

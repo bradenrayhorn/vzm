@@ -56,6 +56,8 @@ type virtualNetwork struct {
 	slots     chan struct{}
 	closeOnce sync.Once
 	activity  networkActivity
+	// Set before Run; defaults to the policy-enforcing host dialer.
+	dialRawTCP func(context.Context, string, string) (net.Conn, error)
 }
 
 func networkFromFD(fd int) (*virtualNetwork, error) {
@@ -83,7 +85,8 @@ func newVirtualNetwork(wire io.ReadWriteCloser) (*virtualNetwork, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &virtualNetwork{
 		wire: wire, dns: newSyntheticDNS(), ctx: ctx, cancel: cancel,
-		slots: make(chan struct{}, maxNetworkConnections),
+		slots:      make(chan struct{}, maxNetworkConnections),
+		dialRawTCP: rawTCPDialer.DialContext,
 		// ethernet.Endpoint subtracts the Ethernet header from the underlying MTU.
 		link: channel.New(256, networkMTU+header.EthernetMinimumSize, tcpip.LinkAddress(gatewayMAC)),
 		stack: stack.New(stack.Options{
@@ -148,9 +151,10 @@ func (n *virtualNetwork) acceptTCP(r *tcp.ForwarderRequest) {
 	if !n.startWorker(func() {
 		defer func() { <-n.slots }()
 		id := r.ID()
-		// No general TCP relay. Existing explicitly approved raw TCP remains on
-		// its separate vsock service, including private/VPN database access.
-		if id.LocalPort != 443 {
+		// Port 443 is always intercepted HTTPS, never an opaque tunnel.
+		// All other ports use one-shot raw TCP approval before any host dial.
+		isHTTPS := id.LocalPort == 443
+		if id.LocalPort == 0 {
 			r.Complete(true)
 			return
 		}
@@ -158,7 +162,11 @@ func (n *virtualNetwork) acceptTCP(r *tcp.ForwarderRequest) {
 		host, synthetic := n.dns.hostname(targetIP)
 		if !synthetic {
 			addr, err := netip.ParseAddr(targetIP)
-			if err != nil || !isAllowedDestinationAddr(addr) {
+			allowed := isAllowedRawTCPDestinationAddr
+			if isHTTPS {
+				allowed = isAllowedDestinationAddr
+			}
+			if err != nil || !allowed(addr) {
 				r.Complete(true)
 				return
 			}
@@ -176,7 +184,11 @@ func (n *virtualNetwork) acceptTCP(r *tcp.ForwarderRequest) {
 		defer stop()
 		port := strconv.Itoa(int(id.LocalPort))
 		measured := &activityConn{Conn: conn, activity: &n.activity}
-		serveTransparentTLS(n.ctx, measured, host, port)
+		if isHTTPS {
+			serveTransparentTLS(n.ctx, measured, host, port)
+		} else if err := n.serveRawTCP(measured, host, port); err != nil && n.ctx.Err() == nil {
+			log.Printf("raw TCP to %s:%s failed: %v", host, port, err)
+		}
 	}) {
 		<-n.slots
 		r.Complete(true)

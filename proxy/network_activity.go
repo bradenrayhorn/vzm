@@ -8,7 +8,7 @@ import (
 )
 
 // Preserve the menu-bar byte counters without sending per-packet IPC. These
-// counters measure guest TCP bytes (including TLS), just as the vsock bridge did.
+// counters measure both intercepted HTTPS and approved raw TCP guest bytes.
 type networkActivity struct {
 	upload   atomic.Int64
 	download atomic.Int64

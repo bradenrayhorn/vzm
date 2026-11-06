@@ -66,7 +66,7 @@ func TestProxyResponseCompressionFraming(t *testing.T) {
 			_ = downstream.SetDeadline(time.Now().Add(time.Second))
 			done := make(chan error, 1)
 			// Deliberately leave the connection open after Write, as the
-			// CONNECT loop does when waiting for the next HTTP request.
+			// HTTPS stream loop does when waiting for the next HTTP request.
 			go func() { done <- writeProxyResponse(proxy, resp) }()
 			forwarded, err := http.ReadResponse(bufio.NewReader(downstream), req)
 			if err != nil {

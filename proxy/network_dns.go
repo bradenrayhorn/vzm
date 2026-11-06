@@ -15,7 +15,8 @@ import (
 const maxSyntheticHosts = 4096
 
 // DNS has no upstream: guest-controlled query labels must not become an egress
-// channel. Only approved HTTP requests cause host-side DNS and socket creation.
+// channel. Only approved HTTP requests or raw TCP connections cause host-side
+// DNS and socket creation.
 // Stable per-host addresses preserve the intended name even without TLS SNI.
 // The benchmark range is deliberately blocked by the normal outbound dialer.
 // Mappings are bounded and never recycled during a VM's lifetime.

@@ -35,7 +35,7 @@ func proxyProcess(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 func TestProxyRejectsLegacyListenerFlags(t *testing.T) {
-	for _, name := range []string{"listen-unix", "listen-tcp"} {
+	for _, name := range []string{"listen-unix", "listen-tcp", "tcp-listen-unix"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -48,10 +48,10 @@ func TestProxyRejectsLegacyListenerFlags(t *testing.T) {
 }
 
 func TestProxyProcessLifecycle(t *testing.T) {
-	for _, bridges := range []bool{false, true} {
+	for _, withGit := range []bool{false, true} {
 		name := "network-only"
-		if bridges {
-			name = "network-with-raw-tcp-and-git"
+		if withGit {
+			name = "network-with-git"
 		}
 		t.Run(name, func(t *testing.T) {
 			// Keep Unix socket paths below Darwin's length limit.
@@ -72,10 +72,10 @@ func TestProxyProcessLifecycle(t *testing.T) {
 			caPath := filepath.Join(dir, "ca.pem")
 			args := []string{"--network-fd", "3", "--ca-cert", caPath}
 			readyPaths := []string{caPath}
-			if bridges {
-				tcpPath, gitPath := filepath.Join(dir, "tcp.sock"), filepath.Join(dir, "git.sock")
-				args = append(args, "--tcp-listen-unix", tcpPath, "--git-listen-unix", gitPath)
-				readyPaths = append(readyPaths, tcpPath, gitPath)
+			if withGit {
+				gitPath := filepath.Join(dir, "git.sock")
+				args = append(args, "--git-listen-unix", gitPath)
+				readyPaths = append(readyPaths, gitPath)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()

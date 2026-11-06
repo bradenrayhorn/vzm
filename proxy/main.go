@@ -34,20 +34,14 @@ var (
 		Timeout:        15 * time.Second,
 		ControlContext: rejectBlockedDialDestination,
 	}
-	rawTCPDialer = &net.Dialer{
-		Timeout:        15 * time.Second,
-		ControlContext: rejectUnsafeRawTCPDialDestination,
-	}
 	outboundClient = &http.Client{
 		Transport: newOutboundTransport(),
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	controlUnixPath      string
-	approvalRequestID    uint64
-	rawTCPAskForApproval = askForApproval
-	rawTCPDialContext    = dialRawTCPContext
+	controlUnixPath   string
+	approvalRequestID uint64
 )
 
 var errBlockedDestination = errors.New("blocked destination")
@@ -71,21 +65,17 @@ const (
 	maxInspectionBodySize  int64 = 1 << 20
 	maxApprovalBodySize    int64 = 64 << 10
 	maxGitProxyConnections       = 32
-	maxRawTCPConnections         = 32
 	gitIntentReadTimeout         = 10 * time.Second
 	gitErrorWriteTimeout         = 2 * time.Second
-	rawTCPHeaderTimeout          = 10 * time.Second
 )
 
 var (
 	gitProxySlots = make(chan struct{}, maxGitProxyConnections)
-	rawTCPSlots   = make(chan struct{}, maxRawTCPConnections)
 	shutdownCtx   = context.Background()
 )
 
 var (
 	publicIPv6GlobalUnicastPrefix = mustPrefix("2000::/3")
-	carrierGradeNATPrefix         = mustPrefix("100.64.0.0/10")
 )
 
 // IANA special-purpose and non-public destination ranges. IPv4-mapped IPv6
@@ -222,7 +212,6 @@ func nextApprovalRequestID() string {
 }
 
 func main() {
-	rawTCPListenUnixPath := flag.String("tcp-listen-unix", "", "Unix domain socket path for the raw TCP CONNECT proxy listener")
 	gitListenUnixPath := flag.String("git-listen-unix", "", "Unix domain socket path for the Git proxy listener")
 	caCertPath := flag.String("ca-cert", "", "Path to write the MITM CA certificate PEM")
 	parentPID := flag.Int("parent-pid", 0, "PID of the parent vzm process; exit if it disappears")
@@ -264,31 +253,6 @@ func main() {
 		}()
 	}
 
-	if *rawTCPListenUnixPath != "" {
-		rawTCPListener, err := listenUnix(*rawTCPListenUnixPath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer rawTCPListener.Close()
-		defer os.Remove(*rawTCPListenUnixPath)
-
-		rawTCPServer := &http.Server{
-			Handler:           http.HandlerFunc(handleRawTCPProxy),
-			ReadHeaderTimeout: rawTCPHeaderTimeout,
-		}
-		go func() {
-			if err := rawTCPServer.Serve(rawTCPListener); err != nil && shutdownCtx.Err() == nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
-				log.Printf("raw TCP proxy listener failed: %v", err)
-				stop()
-			}
-		}()
-		go func() {
-			<-shutdownCtx.Done()
-			_ = rawTCPListener.Close()
-		}()
-		log.Printf("raw TCP proxy listening on %s", rawTCPListener.Addr())
-	}
-
 	if *gitListenUnixPath != "" {
 		gitListener, err := listenUnix(*gitListenUnixPath)
 		if err != nil {
@@ -305,7 +269,7 @@ func main() {
 		}()
 	}
 
-	// The private network and optional raw TCP/Git listeners run independently.
+	// The private network and optional Git listener run independently.
 	<-shutdownCtx.Done()
 }
 
@@ -543,92 +507,12 @@ func exitWhenParentDisappears(cancel func(), parentPID int) {
 	}
 }
 
-func handleRawTCPProxy(w http.ResponseWriter, r *http.Request) {
-	select {
-	case rawTCPSlots <- struct{}{}:
-		defer func() { <-rawTCPSlots }()
-	default:
-		http.Error(w, "Too many concurrent TCP connections", http.StatusServiceUnavailable)
-		return
-	}
-
-	if r.Method != http.MethodConnect {
-		http.Error(w, "Only CONNECT allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	targetHost, targetPort, err := connectTarget(r)
-	if err != nil {
-		log.Printf("blocked invalid raw TCP CONNECT target %q: %v", r.Host, err)
-		http.Error(w, "Invalid CONNECT target", http.StatusBadRequest)
-		return
-	}
-
-	target := net.JoinHostPort(targetHost, targetPort)
-	if !rawTCPAskForApproval(approvalRequest{Type: "TCP_CONNECT", Domain: targetHost, Method: "CONNECT", URL: target}).Approved {
-		http.Error(w, "Blocked by Host Application", http.StatusForbidden)
-		return
-	}
-
-	upstreamConn, err := rawTCPDialContext(shutdownCtx, "tcp", target)
-	if err != nil {
-		log.Printf("raw TCP CONNECT to %s failed: %v", target, err)
-		http.Error(w, "Unable to connect to destination", http.StatusBadGateway)
-		return
-	}
-	defer upstreamConn.Close()
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-	clientConn, clientReadWriter, err := hijacker.Hijack()
-	if err != nil {
-		return
-	}
-	defer clientConn.Close()
-
-	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		return
-	}
-	if err := tunnelConnections(clientConn, clientReadWriter.Reader, upstreamConn, bufio.NewReader(upstreamConn)); err != nil && shutdownCtx.Err() == nil {
-		log.Printf("raw TCP tunnel to %s failed: %v", target, err)
-	}
-}
-
-func connectTarget(r *http.Request) (string, string, error) {
-	target := r.Host
-	if target == "" && r.URL != nil {
-		target = r.URL.Host
-	}
-
-	host, port, err := net.SplitHostPort(target)
-	if err != nil {
-		return "", "", err
-	}
-	host = normalizeDomain(host)
-	portNumber, err := strconv.ParseUint(port, 10, 16)
-	if host == "" || err != nil || portNumber == 0 {
-		return "", "", fmt.Errorf("invalid host or port")
-	}
-	return host, strconv.FormatUint(portNumber, 10), nil
-}
-
 func dialPublicTCPContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return publicDialer.DialContext(ctx, network, address)
 }
 
-func dialRawTCPContext(ctx context.Context, network, address string) (net.Conn, error) {
-	return rawTCPDialer.DialContext(ctx, network, address)
-}
-
 func rejectBlockedDialDestination(_ context.Context, network, address string, _ syscall.RawConn) error {
 	return rejectDialDestination(network, address, isAllowedDestinationAddr)
-}
-
-func rejectUnsafeRawTCPDialDestination(_ context.Context, network, address string, _ syscall.RawConn) error {
-	return rejectDialDestination(network, address, isAllowedRawTCPDestinationAddr)
 }
 
 func rejectDialDestination(network, address string, allowed func(netip.Addr) bool) error {
@@ -645,22 +529,6 @@ func rejectDialDestination(network, address string, allowed func(netip.Addr) boo
 		return fmt.Errorf("%w: %s", errBlockedDestination, addr)
 	}
 	return nil
-}
-
-// isAllowedRawTCPDestinationAddr permits public destinations plus private-use
-// and carrier-grade NAT addresses commonly reached over a VPN. Host loopback,
-// link-local, multicast, unspecified, documentation, and other reserved ranges
-// remain blocked even after the raw TCP connection is approved.
-func isAllowedRawTCPDestinationAddr(addr netip.Addr) bool {
-	if !addr.IsValid() || addr.Zone() != "" {
-		return false
-	}
-
-	addr = addr.Unmap()
-	if addr.IsPrivate() || carrierGradeNATPrefix.Contains(addr) {
-		return true
-	}
-	return isAllowedDestinationAddr(addr)
 }
 
 func isAllowedDestinationAddr(addr netip.Addr) bool {
@@ -907,7 +775,7 @@ func proxyWebSocketConnection(clientConn net.Conn, clientReader *bufio.Reader, i
 	return tunnelConnections(clientConn, clientReader, upstreamConn, upstreamReader)
 }
 
-func tunnelConnections(clientConn net.Conn, clientReader *bufio.Reader, upstreamConn net.Conn, upstreamReader *bufio.Reader) error {
+func tunnelConnections(clientConn net.Conn, clientReader io.Reader, upstreamConn net.Conn, upstreamReader io.Reader) error {
 	errCh := make(chan error, 2)
 
 	go func() {

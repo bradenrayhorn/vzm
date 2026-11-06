@@ -63,11 +63,15 @@ func TestPrivateNetworkConnectionLimit(t *testing.T) {
 		}
 	}()
 	ip, _ := guest.host.dns.address("example.test")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if conn, err := guest.dial(ctx, netip.AddrFrom4(ip).String(), 443); err == nil {
-		conn.Close()
-		t.Fatal("connection cap ignored")
+	for _, port := range []uint16{443, 5432} {
+		t.Run(fmt.Sprint(port), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if conn, err := guest.dial(ctx, netip.AddrFrom4(ip).String(), port); err == nil {
+				conn.Close()
+				t.Fatal("shared HTTPS/raw TCP connection cap ignored")
+			}
+		})
 	}
 }
 
