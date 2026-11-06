@@ -1088,11 +1088,11 @@ final class ApprovalTests: XCTestCase {
         XCTAssertEqual(presentations.count, 3)
     }
 
-    func testNewConnectAlwaysPromptsInEveryMode() async throws {
+    func testNewConnectPromptsInAutoAndStrict() async throws {
         let service = try service()
         var r = request("cache.nixos.org:443", type: "CONNECT", method: "CONNECT")
         r.domain = "cache.nixos.org"
-        for selection in [ApprovalMode.strict, .auto, .approveEverything(until: Date().addingTimeInterval(60))] {
+        for selection in [ApprovalMode.strict, .auto] {
             mode.select(selection)
             await assertDecision(service, r, false)
         }
@@ -1107,7 +1107,34 @@ final class ApprovalTests: XCTestCase {
         mode.select(.strict)
         await assertDecision(service, request(), false)
         let presentations = await prompts.presentations
-        XCTAssertEqual(presentations.count, 5)
+        XCTAssertEqual(presentations.count, 4)
+    }
+
+    func testApproveEverythingAllowsNewConnectWithoutPersistingTrust() async throws {
+        let engine = ApprovalEngineSpy()
+        let service = try service(engines: [engine])
+        var r = request("new.example:443", type: "CONNECT", method: "CONNECT")
+        r.domain = "new.example"
+        r.headers = [ProxyApprovalHeader(name: "User-Agent", value: "temporary-agent")]
+        mode.select(.approveEverything(until: Date().addingTimeInterval(60)))
+        await assertDecision(service, r, true)
+        await assertDecision(service, r, true)
+        await assertDecision(service, request("telemetry.nextjs.org:443", type: "CONNECT", method: "CONNECT"), false)
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+        XCTAssertEqual(engine.evaluationCount, 0)
+        XCTAssertFalse(store.contains(r.domain, type: .domain))
+        XCTAssertFalse(store.contains("temporary-agent", type: .userAgent))
+
+        let reloadedStore = try RecognizedElementStore(directoryURL: directory)
+        XCTAssertFalse(reloadedStore.contains(r.domain, type: .domain))
+        XCTAssertFalse(reloadedStore.contains("temporary-agent", type: .userAgent))
+        for selection in [ApprovalMode.auto, .strict, .approveEverything(until: Date().addingTimeInterval(-1))] {
+            mode.select(selection)
+            await assertDecision(service, r, false)
+        }
+        let finalPresentations = await prompts.presentations
+        XCTAssertEqual(finalPresentations.count, 3)
     }
 
     func testDeniedTrafficCannotBeApprovedByModes() async throws {
@@ -2082,11 +2109,32 @@ final class ApprovalTests: XCTestCase {
         XCTAssertEqual(presentations.last?.actions.map(\.id), [.deny, .approveOnce])
     }
 
+    func testApproveEverythingAllowsWebSocketsButPreservesProtections() async throws {
+        let service = try service()
+        let r = request("example.com/socket", type: "WEBSOCKET")
+        mode.select(.approveEverything(until: Date().addingTimeInterval(60)))
+        await assertDecision(service, r, true)
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+
+        var secretRequest = r
+        secretRequest.secrets = ["TOKEN"]
+        await assertDecision(service, secretRequest, false)
+        await assertDecision(service, request("telemetry.nextjs.org/socket", type: "WEBSOCKET"), false)
+
+        for selection in [ApprovalMode.strict, .auto, .approveEverything(until: Date().addingTimeInterval(-1))] {
+            mode.select(selection)
+            await assertDecision(service, r, false)
+        }
+        let finalPresentations = await prompts.presentations
+        XCTAssertEqual(finalPresentations.count, 4)
+    }
+
     func testApproveEverythingRetainsExclusionsAndExpiresToAuto() async throws {
         let service = try service()
         mode.select(.approveEverything(until: Date().addingTimeInterval(60)))
         await assertDecision(service, request("example.com/arbitrary"), true)
-        for type in ["GIT", "WEBSOCKET", "TCP_CONNECT"] {
+        for type in ["GIT", "TCP_CONNECT"] {
             await assertDecision(service, request("example.com:443", type: type), false)
         }
         var r = request("example.com/arbitrary")

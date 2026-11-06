@@ -160,8 +160,13 @@ actor ApprovalService {
 
         let mode = modeState.current()
 
-        // Strict never reuses engine consent. New CONNECT domains and raw TCP
-        // connections also require one-shot approval in every mode.
+        // Temporary CONNECT approval must not establish persistent domain trust.
+        if case .approveEverything = mode, request.type == "CONNECT" {
+            return .approved(request: request, reason: "mode Approve Everything")
+        }
+
+        // Strict never reuses engine consent. New CONNECT domains require
+        // one-shot approval outside Approve Everything; raw TCP does in every mode.
         // Already-open connections are unaffected by approval-mode changes.
         if mode == .strict || isRawTCP || request.type == "CONNECT" {
             return .needsUserApproval(
@@ -177,7 +182,7 @@ actor ApprovalService {
         }
 
         if case .approveEverything = mode,
-           !isGit, request.type != "WEBSOCKET", request.secrets.isEmpty {
+           !isGit, request.secrets.isEmpty {
             return .approved(request: request, reason: "mode Approve Everything")
         }
 
