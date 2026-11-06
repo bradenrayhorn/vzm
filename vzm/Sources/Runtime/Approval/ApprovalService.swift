@@ -76,6 +76,7 @@ actor ApprovalService {
         self.engines = engines ?? [
             AzureDevOpsMavenApprovalEngine(recognizedElementStore: recognizedElementStore),
             AzureDevOpsNpmApprovalEngine(),
+            OpenRouterApprovalEngine(),
             SecretRequestApprovalEngine(recognizedElementStore: recognizedElementStore),
             ChatGPTApprovalEngine(),
             IntelliJApprovalEngine(),

@@ -27,6 +27,18 @@ enum ApprovalHeaderMasker {
         "application/vnd.github+json", "application/vnd.npm.install-v1+json",
         "application/rss+xml", "application/atom+xml",
     ]
+    private static let safeContentTypes = safeAccept.subtracting(["*/*"]).union([
+        "application/x-www-form-urlencoded", "application/ndjson", "application/x-ndjson",
+        "application/json-patch+json", "application/merge-patch+json",
+        "application/graphql", "application/graphql-response+json",
+        "application/cbor", "application/msgpack", "application/x-protobuf",
+        "multipart/form-data", "multipart/mixed", "multipart/related",
+        "image/bmp", "image/tiff", "audio/mpeg", "audio/wav", "audio/ogg", "video/mp4", "video/webm",
+    ])
+    private static let safeCharsets: Set<String> = [
+        "utf-8", "utf8", "us-ascii", "ascii", "iso-8859-1", "latin1", "windows-1252",
+        "utf-16", "utf-16le", "utf-16be",
+    ]
     private static let qualityRegex = try! NSRegularExpression(pattern: #"\A[0-9]{0,3}(?:\.[0-9]{0,3})?\z"#)
     private static let safeEncodings: Set<String> = ["zstd", "br", "gzip", "deflate", "bzip2", "xz"]
     // Defensive token-length cap, not a documented Cloudflare maximum.
@@ -68,6 +80,15 @@ enum ApprovalHeaderMasker {
         return qualityRegex.firstMatch(in: quality, range: NSRange(quality.startIndex..<quality.endIndex, in: quality)) != nil
     }
 
+    private static func isSafeContentType(_ value: String) -> Bool {
+        // Match common values, rather than validate MIME syntax.
+        let parts = value.lowercased().filter { !$0.isWhitespace && $0 != "\"" }.split(separator: ";")
+        guard let mediaType = parts.first, safeContentTypes.contains(String(mediaType)) else { return false }
+        return parts.dropFirst().allSatisfy { parameter in
+            parameter.hasPrefix("charset=") && safeCharsets.contains(String(parameter.dropFirst(8)))
+        }
+    }
+
     static func isSafe(_ header: ProxyApprovalHeader, in request: ProxyApprovalRequest) -> Bool {
         let name = header.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let value = header.value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -84,6 +105,8 @@ enum ApprovalHeaderMasker {
             let accepts = value.split(separator: ",", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             return !accepts.isEmpty && accepts.allSatisfy(isSafeAcceptItem)
+        case "content-type":
+            return isSafeContentType(header.value)
         case "cookie":
             // Only hide the bot-management cookie, never unrelated or mixed cookies.
             return cloudflareBotCookieRegex.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
