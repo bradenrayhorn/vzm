@@ -77,6 +77,7 @@ actor ApprovalService {
             AzureDevOpsMavenApprovalEngine(recognizedElementStore: recognizedElementStore),
             AzureDevOpsNpmApprovalEngine(),
             OpenRouterApprovalEngine(),
+            DatadogApprovalEngine(recognizedElementStore: recognizedElementStore),
             SecretRequestApprovalEngine(recognizedElementStore: recognizedElementStore),
             ChatGPTApprovalEngine(),
             IntelliJApprovalEngine(),
@@ -126,6 +127,12 @@ actor ApprovalService {
     }
 
     private func evaluate(request: ProxyApprovalRequest) -> EvaluationResult {
+        // Hard denials run before mode overrides, masking, or saved approvals.
+        for rule in denyRules + engines.compactMap({ $0 as? any DenyRule }) {
+            if rule.shouldDeny(request) {
+                return .denied(request: request, reason: "deny rule \(rule.name)")
+            }
+        }
         var request = request
         let isRawTCP = request.type == "TCP_CONNECT"
         let isGit = request.type.uppercased() == "GIT"
@@ -144,12 +151,6 @@ actor ApprovalService {
         }
         if isRawTCP {
             warnings.append(Self.rawTCPWarning)
-        }
-
-        for rule in denyRules {
-            if rule.matches(request) {
-                return .denied(request: request, reason: "deny rule \(rule.name)")
-            }
         }
 
         if knownDomain && request.type == "CONNECT" {
@@ -189,6 +190,8 @@ actor ApprovalService {
         var selectedEngine: SelectedEngine?
         for engine in engines {
             switch engine.evaluate(request) {
+            case .denied:
+                return .denied(request: request, reason: "engine \(engine.name)")
             case .approved:
                 return .approved(request: request, reason: "Auto rule, engine \(engine.name)")
             case let .needsConsent(prompt):

@@ -262,7 +262,9 @@ struct ProxyApprovalRequest: Codable, Sendable {
     var url: String
     var headers: [ProxyApprovalHeader]
     var body: ProxyApprovalBody?
-    var secrets: [String]
+    var secrets: [ProxyApprovalSecret]
+
+    var secretNames: [String] { secrets.map(\.name) }
 }
 
 struct ProxyApprovalHeader: Codable, Sendable, Hashable {
@@ -320,7 +322,7 @@ private func resolveSecretSubstitutions(for request: ProxyApprovalRequest) throw
     let metadataByName = try Dictionary(uniqueKeysWithValues: secretStore.listSecrets().map { ($0.name, $0) })
 
     var substitutions: [String: String] = [:]
-    for name in Set(request.secrets) {
+    for name in Set(request.secretNames) {
         guard let metadata = metadataByName[name] else {
             throw SecretStore.Error.secretNotFound(name)
         }

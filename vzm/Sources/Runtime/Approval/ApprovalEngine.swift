@@ -10,12 +10,13 @@ protocol ApprovalEngine {
 /// A matching hard-deny rule blocks the request before any approval policy.
 protocol DenyRule {
     var name: String { get }
-    func matches(_ request: ProxyApprovalRequest) -> Bool
+    func shouldDeny(_ request: ProxyApprovalRequest) -> Bool
 }
 
 enum EngineEvaluation {
     case notApplicable
     case approved
+    case denied
     case needsConsent(EnginePrompt)
 }
 
@@ -47,7 +48,7 @@ struct ApprovalPromptSection: Codable, Sendable {
         }
 
         if !request.secrets.isEmpty {
-            sections.append(ApprovalPromptSection(title: "Secrets", text: request.secrets.joined(separator: ", ")))
+            sections.append(ApprovalPromptSection(title: "Secrets", text: request.secrets.map { "\($0.name) (\($0.location.rawValue))" }.joined(separator: ", ")))
         }
 
         return sections

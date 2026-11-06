@@ -5,7 +5,7 @@ import Foundation
 final class DenyJetBrainsOptionalServicesRule: DenyRule {
     var name: String { "DenyJetBrainsOptionalServices" }
 
-    func matches(_ request: ProxyApprovalRequest) -> Bool {
+    func shouldDeny(_ request: ProxyApprovalRequest) -> Bool {
         let domain = DomainName.normalize(request.domain)
 
         // Blocking CONNECT here avoids a second prompt for the inner AI request.

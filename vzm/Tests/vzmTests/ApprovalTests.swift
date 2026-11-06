@@ -30,7 +30,7 @@ private final class DenyRuleObserver: DenyRule {
         self.onRequest = onRequest
     }
 
-    func matches(_ request: ProxyApprovalRequest) -> Bool {
+    func shouldDeny(_ request: ProxyApprovalRequest) -> Bool {
         onRequest(request)
         return matchResult
     }
@@ -115,7 +115,7 @@ final class ApprovalTests: XCTestCase {
         let prefix = project.map { "\(organization)/\($0)" } ?? organization
         var r = request("pkgs.dev.azure.com/\(prefix)/_packaging/\(feed)/maven/v1/org/example/lib/1.0/lib-1.0.jar")
         r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer {vzm:PAT}")]
-        r.secrets = ["PAT"]
+        r.secrets = ["PAT"].map { .init(name: $0, location: .header) }
         return r
     }
 
@@ -123,7 +123,7 @@ final class ApprovalTests: XCTestCase {
         let prefix = project.map { "\(organization)/\($0)" } ?? organization
         var r = request("pkgs.dev.azure.com/\(prefix)/_packaging/\(feed)/npm/registry/@scope%2fpackage")
         r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer {vzm:PAT}")]
-        r.secrets = ["PAT"]
+        r.secrets = ["PAT"].map { .init(name: $0, location: .header) }
         return r
     }
 
@@ -131,7 +131,7 @@ final class ApprovalTests: XCTestCase {
         var r = request("build-cache.bushelops.com/auth/exchange/pat", method: "POST")
         r.headers = [ProxyApprovalHeader(name: "Authorization", value: "Bearer {vzm:PAT}")]
         r.body = ProxyApprovalBody(text: "request payload", warning: "")
-        r.secrets = ["PAT"]
+        r.secrets = ["PAT"].map { .init(name: $0, location: .header) }
         return r
     }
 
@@ -207,14 +207,14 @@ final class ApprovalTests: XCTestCase {
                 for type in ["REQUEST", "CONNECT", "TCP_CONNECT", "GIT", "WEBSOCKET"] {
                     var r = request(domain + "/collect", type: type)
                     r.domain = variant
-                    XCTAssertTrue(rule.matches(r), "\(type): \(variant)")
+                    XCTAssertTrue(rule.shouldDeny(r), "\(type): \(variant)")
                 }
             }
         }
         for domain in ["example.com", "sub.telemetry.nextjs.org", "telemetry.nextjs.org.example.com", ""] {
             var r = request()
             r.domain = domain
-            XCTAssertFalse(rule.matches(r), domain)
+            XCTAssertFalse(rule.shouldDeny(r), domain)
         }
     }
 
@@ -224,7 +224,7 @@ final class ApprovalTests: XCTestCase {
         for type in ["REQUEST", "CONNECT", "TCP_CONNECT", "GIT", "WEBSOCKET"] {
             var r = request("api.jetbrains.ai/test", type: type)
             r.domain = " API.JETBRAINS.AI:443 "
-            XCTAssertTrue(rule.matches(r), type)
+            XCTAssertTrue(rule.shouldDeny(r), type)
         }
         for url in [
             "frameworks.jetbrains.com/llm-config/config.json",
@@ -233,10 +233,10 @@ final class ApprovalTests: XCTestCase {
         ] {
             var r = request(url)
             r.url = " \n" + url.uppercased() + "\t"
-            XCTAssertTrue(rule.matches(r), url)
+            XCTAssertTrue(rule.shouldDeny(r), url)
             for type in ["CONNECT", "TCP_CONNECT", "GIT", "WEBSOCKET"] {
                 r.type = type
-                XCTAssertFalse(rule.matches(r), "\(type): \(url)")
+                XCTAssertFalse(rule.shouldDeny(r), "\(type): \(url)")
             }
         }
         for url in [
@@ -247,7 +247,7 @@ final class ApprovalTests: XCTestCase {
             "resources.jetbrains.com/storage/other/config.json",
             "example.com/llm-config/config.json",
         ] {
-            XCTAssertFalse(rule.matches(request(url)), url)
+            XCTAssertFalse(rule.shouldDeny(request(url)), url)
         }
     }
 
@@ -264,7 +264,7 @@ final class ApprovalTests: XCTestCase {
             ] {
                 var r = request()
                 r.domain = " \n" + domain.uppercased() + suffix + "\t"
-                XCTAssertEqual(rule.matches(r), expected, "\(rule.name): \(r.domain)")
+                XCTAssertEqual(rule.shouldDeny(r), expected, "\(rule.name): \(r.domain)")
             }
         }
     }
@@ -674,7 +674,7 @@ final class ApprovalTests: XCTestCase {
         withBody.body = ProxyApprovalBody(text: "data", warning: "")
         requests.append(withBody)
         var withSecret = request("registry.npmjs.org/package")
-        withSecret.secrets = ["PAT"]
+        withSecret.secrets = ["PAT"].map { .init(name: $0, location: .header) }
         requests.append(withSecret)
         for var r in requests {
             r.headers = headers
@@ -730,7 +730,7 @@ final class ApprovalTests: XCTestCase {
         await assertDecision(service, otherProject, true)
         otherProject.headers.append(ProxyApprovalHeader(name: "X-New", value: "data"))
         await assertDecision(service, otherProject, false)
-        another.secrets.append("NEW_SECRET")
+        another.secrets.append(.init(name: "NEW_SECRET", location: .header))
         await assertDecision(service, another, false)
         another = r
         another.headers[0].value = "Bearer changed"
@@ -767,16 +767,16 @@ final class ApprovalTests: XCTestCase {
             r.body = ProxyApprovalBody(text: "payload", warning: "")
             XCTAssertFalse(engine.evaluate(r).isApproved)
             r = request(url)
-            r.secrets = ["UNAPPROVED"]
+            r.secrets = ["UNAPPROVED"].map { .init(name: $0, location: .header) }
             XCTAssertFalse(engine.evaluate(r).isApproved)
         }
         var credentialed = azureNpmRequest()
         let azure = AzureDevOpsNpmApprovalEngine()
         XCTAssertFalse(azure.evaluate(credentialed).isApproved)
         azure.onEngineApproved(credentialed)
-        credentialed.secrets = ["PAT", "PAT"]
+        credentialed.secrets = ["PAT", "PAT"].map { .init(name: $0, location: .header) }
         XCTAssertTrue(azure.evaluate(credentialed).isApproved)
-        credentialed.secrets = ["pat"]
+        credentialed.secrets = ["pat"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(azure.evaluate(credentialed).isApproved)
 
         for url in [
@@ -790,13 +790,13 @@ final class ApprovalTests: XCTestCase {
             "pkgs.dev.azure.com/org/_packaging/feed/npm/registry/package?data=secret",
         ] {
             var invalid = request(url)
-            invalid.secrets = ["UNAPPROVED"]
+            invalid.secrets = ["UNAPPROVED"].map { .init(name: $0, location: .header) }
             XCTAssertFalse(azure.evaluate(invalid).isApproved, url)
             if case .notApplicable = azure.evaluate(invalid) {} else { XCTFail("Invalid feed URL matched: \(url)") }
             azure.onEngineApproved(invalid)
         }
         credentialed = azureNpmRequest()
-        credentialed.secrets = ["UNAPPROVED"]
+        credentialed.secrets = ["UNAPPROVED"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(azure.evaluate(credentialed).isApproved)
     }
 
@@ -830,7 +830,7 @@ final class ApprovalTests: XCTestCase {
         var headerOnly = request(url)
         headerOnly.headers = [ProxyApprovalHeader(name: "X-Custom", value: "approved")]
         var secretOnly = request(url)
-        secretOnly.secrets = ["PAT"]
+        secretOnly.secrets = ["PAT"].map { .init(name: $0, location: .header) }
         XCTAssertTrue(engine.evaluate(request(url)).isApproved)
         XCTAssertFalse(engine.evaluate(headerOnly).isApproved)
         XCTAssertFalse(engine.evaluate(secretOnly).isApproved)
@@ -840,13 +840,13 @@ final class ApprovalTests: XCTestCase {
         engine.onEngineApproved(secretOnly)
 
         var combined = headerOnly
-        combined.secrets = ["PAT", "PAT"]
+        combined.secrets = ["PAT", "PAT"].map { .init(name: $0, location: .header) }
         combined.url = "pkgs.dev.azure.com/other/project/_packaging/another/npm/registry/package"
         XCTAssertTrue(engine.evaluate(combined).isApproved)
         let fresh = AzureDevOpsNpmApprovalEngine()
         XCTAssertFalse(fresh.evaluate(combined).isApproved)
         XCTAssertTrue(fresh.evaluate(request(url)).isApproved)
-        combined.secrets.append("NEW_SECRET")
+        combined.secrets.append(.init(name: "NEW_SECRET", location: .header))
         XCTAssertFalse(engine.evaluate(combined).isApproved)
     }
 
@@ -874,7 +874,7 @@ final class ApprovalTests: XCTestCase {
             r.body = ProxyApprovalBody(text: "payload", warning: "")
             XCTAssertFalse(engine.evaluate(r).isApproved, engine.name)
             r = request(url)
-            r.secrets = ["TOKEN"]
+            r.secrets = ["TOKEN"].map { .init(name: $0, location: .header) }
             XCTAssertFalse(engine.evaluate(r).isApproved, engine.name)
             for type in ["CONNECT", "TCP_CONNECT", "GIT", "WEBSOCKET"] {
                 XCTAssertFalse(engine.evaluate(request(url, type: type)).isApproved, engine.name)
@@ -1025,7 +1025,7 @@ final class ApprovalTests: XCTestCase {
             XCTAssertFalse(engine.evaluate(invalid).isApproved)
         }
         var invalid = r
-        invalid.secrets = ["TOKEN"]
+        invalid.secrets = ["TOKEN"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(engine.evaluate(invalid).isApproved)
         invalid = r
         invalid.body = ProxyApprovalBody(text: "payload", warning: "")
@@ -1160,7 +1160,7 @@ final class ApprovalTests: XCTestCase {
         ]
         for r in requests { await assertDecision(service, r, false) }
         var secretRequest = request()
-        secretRequest.secrets = ["TOKEN"]
+        secretRequest.secrets = ["TOKEN"].map { .init(name: $0, location: .header) }
         await assertDecision(service, secretRequest, false)
         let presentations = await prompts.presentations
         XCTAssertEqual(presentations.count, requests.count + 1)
@@ -1255,7 +1255,7 @@ final class ApprovalTests: XCTestCase {
         invalid.body = ProxyApprovalBody(text: "payload", warning: "")
         invalidRequests.append(invalid)
         invalid = r
-        invalid.secrets = ["TOKEN"]
+        invalid.secrets = ["TOKEN"].map { .init(name: $0, location: .header) }
         invalidRequests.append(invalid)
         for url in ["example.com/backend-api/codex/responses", "chatgpt.com/other", "chatgpt.com/backend-api/codex/responses?extra=1"] {
             invalid = r
@@ -1312,11 +1312,11 @@ final class ApprovalTests: XCTestCase {
     func testSecretRequestRuleMatchesExactMethodURLAndSecretSet() {
         let engine = SecretRequestApprovalEngine(recognizedElementStore: store)
         var r = secretRequest()
-        r.secrets = ["PAT", "SECOND"]
+        r.secrets = ["PAT", "SECOND"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(engine.evaluate(r).isApproved)
         engine.onEngineApproved(r)
         var reordered = r
-        reordered.secrets = ["SECOND", "PAT", "PAT"]
+        reordered.secrets = ["SECOND", "PAT", "PAT"].map { .init(name: $0, location: .header) }
         XCTAssertTrue(engine.evaluate(reordered).isApproved)
 
         var changed = r
@@ -1331,15 +1331,15 @@ final class ApprovalTests: XCTestCase {
         }
         for secrets in [["PAT"], ["SECOND"], ["PAT", "SECOND", "THIRD"], ["different"], ["pat", "SECOND"]] {
             changed = r
-            changed.secrets = secrets
+            changed.secrets = secrets.map { .init(name: $0, location: .header) }
             XCTAssertFalse(engine.evaluate(changed).isApproved)
         }
 
         // Structured keys must not collide when secret names contain separators.
-        r.secrets = ["a\nb", "c"]
+        r.secrets = ["a\nb", "c"].map { .init(name: $0, location: .header) }
         engine.onEngineApproved(r)
         changed = r
-        changed.secrets = ["a", "b\nc"]
+        changed.secrets = ["a", "b\nc"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(engine.evaluate(changed).isApproved)
     }
 
@@ -1361,7 +1361,7 @@ final class ApprovalTests: XCTestCase {
         invalidRequests.append(invalid)
         for secrets in [[String](), [""], [" \n\t"], ["PAT", ""]] {
             invalid = r
-            invalid.secrets = secrets
+            invalid.secrets = secrets.map { .init(name: $0, location: .header) }
             invalidRequests.append(invalid)
         }
         for invalid in invalidRequests {
@@ -1386,7 +1386,7 @@ final class ApprovalTests: XCTestCase {
             $0.contains("permanent approval to disk") && $0.contains("request body or other headers change")
         })
         XCTAssertEqual(presentation.sections.first { $0.title == "URL" }?.text, "POST \(r.url)")
-        XCTAssertEqual(presentation.sections.first { $0.title == "Secrets" }?.text, "PAT")
+        XCTAssertEqual(presentation.sections.first { $0.title == "Secrets" }?.text, "PAT (header)")
         XCTAssertEqual(presentation.sections.first { $0.title == "Headers" }?.text, "Authorization: Bearer {vzm:PAT}")
         XCTAssertEqual(presentation.sections.first { $0.title == "Body" }?.text, r.body?.text)
         XCTAssertEqual(presentation.actions.map(\.id), [.deny, .approveEngine, .approveOnce])
@@ -1463,7 +1463,7 @@ final class ApprovalTests: XCTestCase {
             XCTAssertFalse(engine.matches(request(invalid)), invalid)
         }
         var invalid = request(url)
-        invalid.secrets = ["PAT"]
+        invalid.secrets = ["PAT"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(engine.matches(invalid))
         invalid = request(url, method: "POST")
         XCTAssertFalse(engine.matches(invalid))
@@ -1533,7 +1533,7 @@ final class ApprovalTests: XCTestCase {
         }
         mode.select(.auto)
         var changed = otherFeed
-        changed.secrets.append("NEW_SECRET")
+        changed.secrets.append(.init(name: "NEW_SECRET", location: .header))
         await assertDecision(service, changed, false)
         changed = otherFeed
         changed.headers.append(ProxyApprovalHeader(name: "X-New", value: "new value"))
@@ -1570,7 +1570,7 @@ final class ApprovalTests: XCTestCase {
 
         var other = azureMavenRequest(project: "other-project")
         other.headers = [ProxyApprovalHeader(name: "X-Other", value: "other")]
-        other.secrets = ["OTHER"]
+        other.secrets = ["OTHER"].map { .init(name: $0, location: .header) }
         engine.onEngineApproved(other)
         var changed = r
         changed.headers = other.headers
@@ -1600,7 +1600,7 @@ final class ApprovalTests: XCTestCase {
         var other = r
         other.url = azureMavenRequest(project: "project").url
         XCTAssertFalse(restarted.evaluate(other).isApproved)
-        r.secrets = ["NEW_SECRET"]
+        r.secrets = ["NEW_SECRET"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(restarted.evaluate(r).isApproved)
     }
 
@@ -1679,16 +1679,16 @@ final class ApprovalTests: XCTestCase {
         XCTAssertTrue(engine.evaluate(r).isApproved)
 
         var another = azureMavenRequest()
-        another.secrets = ["SECOND"]
+        another.secrets = ["SECOND"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(engine.evaluate(another).isApproved)
         engine.onEngineApproved(another)
-        another.secrets = ["PAT", "SECOND", "PAT"]
+        another.secrets = ["PAT", "SECOND", "PAT"].map { .init(name: $0, location: .header) }
         XCTAssertTrue(engine.evaluate(another).isApproved)
         let restarted = AzureDevOpsMavenApprovalEngine(recognizedElementStore: store)
         XCTAssertTrue(restarted.evaluate(another).isApproved)
         XCTAssertTrue(engine.evaluate(readOnly).isApproved)
         XCTAssertTrue(restarted.evaluate(readOnly).isApproved)
-        another.secrets = ["pat"]
+        another.secrets = ["pat"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(engine.evaluate(another).isApproved)
         another = r
         another.headers = [ProxyApprovalHeader(name: "Authorization", value: "different value")]
@@ -1730,11 +1730,11 @@ final class ApprovalTests: XCTestCase {
             XCTAssertFalse(engine.evaluate(invalid).isApproved)
             if case .notApplicable = engine.evaluate(invalid) {} else { XCTFail("Invalid Maven request matched") }
             var invalidConsent = invalid
-            invalidConsent.secrets = ["UNAPPROVED"]
+            invalidConsent.secrets = ["UNAPPROVED"].map { .init(name: $0, location: .header) }
             engine.onEngineApproved(invalidConsent)
         }
         another = r
-        another.secrets = ["UNAPPROVED"]
+        another.secrets = ["UNAPPROVED"].map { .init(name: $0, location: .header) }
         XCTAssertFalse(engine.evaluate(another).isApproved)
     }
 
@@ -1914,7 +1914,7 @@ final class ApprovalTests: XCTestCase {
             ProxyApprovalHeader(name: "X-Custom", value: "not consented"),
         ]
         r.body = ProxyApprovalBody(text: "payload", warning: "Body warning")
-        r.secrets = ["TOKEN"]
+        r.secrets = ["TOKEN"].map { .init(name: $0, location: .header) }
         mode.select(.strict)
         await prompts.setAction(.approveOnce)
         await assertDecision(service, r, true)
@@ -1925,7 +1925,7 @@ final class ApprovalTests: XCTestCase {
         let presentation = try XCTUnwrap(presentations.first)
         XCTAssertTrue(presentation.warnings.contains("Body warning"))
         XCTAssertEqual(presentation.sections.first { $0.title == "Body" }?.text, "payload")
-        XCTAssertEqual(presentation.sections.first { $0.title == "Secrets" }?.text, "TOKEN")
+        XCTAssertEqual(presentation.sections.first { $0.title == "Secrets" }?.text, "TOKEN (header)")
         XCTAssertTrue(presentation.sections.first { $0.title == "Headers" }?.text.contains("new-agent") == true)
 
         r.body = nil
@@ -2118,7 +2118,7 @@ final class ApprovalTests: XCTestCase {
         XCTAssertTrue(presentations.isEmpty)
 
         var secretRequest = r
-        secretRequest.secrets = ["TOKEN"]
+        secretRequest.secrets = ["TOKEN"].map { .init(name: $0, location: .header) }
         await assertDecision(service, secretRequest, false)
         await assertDecision(service, request("telemetry.nextjs.org/socket", type: "WEBSOCKET"), false)
 
@@ -2138,7 +2138,7 @@ final class ApprovalTests: XCTestCase {
             await assertDecision(service, request("example.com:443", type: type), false)
         }
         var r = request("example.com/arbitrary")
-        r.secrets = ["TOKEN"]
+        r.secrets = ["TOKEN"].map { .init(name: $0, location: .header) }
         await assertDecision(service, r, false)
         mode.select(.approveEverything(until: Date().addingTimeInterval(-1)))
         await assertDecision(service, request(), true)

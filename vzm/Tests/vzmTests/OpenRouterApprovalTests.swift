@@ -66,7 +66,7 @@ final class OpenRouterApprovalTests: XCTestCase {
             id: UUID().uuidString, type: "REQUEST", domain: "openrouter.ai", method: "POST",
             url: "openrouter.ai/api/v1/" + (anthropic ? "messages?beta=true" : "chat/completions"),
             headers: headers, body: .init(text: #"{"model":"example","messages":[],"stream":true}"#, warning: ""),
-            secrets: [secret]
+            secrets: [.init(name: secret, location: .authorizationHeader)]
         )
     }
 
@@ -201,11 +201,11 @@ final class OpenRouterApprovalTests: XCTestCase {
         let another = request(secret: "SECOND")
         assertConsent(engine, another)
         var extra = request()
-        extra.secrets += ["SECOND", "SECOND"]
+        extra.secrets += ["SECOND", "SECOND"].map { .init(name: $0, location: .header) }
         assertConsent(engine, extra)
         engine.onEngineApproved(extra)
         assertApproved(engine, another)
-        extra.secrets = ["SECOND", "OPENROUTER_API_KEY"]
+        extra.secrets = ["SECOND", "OPENROUTER_API_KEY"].map { .init(name: $0, location: .header) }
         assertApproved(engine, extra)
         assertConsent(engine, request(secret: "openrouter_api_key"))
     }
@@ -231,8 +231,8 @@ final class OpenRouterApprovalTests: XCTestCase {
         }
         var r = request(); r.body = nil; invalid.append(r)
         r = request(); r.secrets = []; invalid.append(r)
-        r = request(); r.secrets = ["OTHER"]; invalid.append(r)
-        r = request(); r.secrets.append(" "); invalid.append(r)
+        r = request(); r.secrets = ["OTHER"].map { .init(name: $0, location: .header) }; invalid.append(r)
+        r = request(); r.secrets.append(.init(name: " ", location: .header)); invalid.append(r)
         r = request(); r.headers.removeAll { $0.name == "Authorization" }; invalid.append(r)
         r = request(); r.headers.append(.init(name: "authorization", value: "Bearer {vzm:OPENROUTER_API_KEY}")); invalid.append(r)
         r = request(); r.headers.append(.init(name: "X-Api-Key", value: "{vzm:OPENROUTER_API_KEY}")); invalid.append(r)
@@ -265,7 +265,7 @@ final class OpenRouterApprovalTests: XCTestCase {
         XCTAssertEqual(presentations.count, 2)
         XCTAssertEqual(presentations.last?.title, "OpenRouter session")
         XCTAssertTrue(presentations.last?.warnings.contains { $0.contains("conversation content") } == true)
-        XCTAssertTrue(presentations.last?.sections.contains { $0.title == "Secrets" && $0.text == "OPENROUTER_API_KEY" } == true)
+        XCTAssertTrue(presentations.last?.sections.contains { $0.title == "Secrets" && $0.text == "OPENROUTER_API_KEY (authorizationHeader)" } == true)
         XCTAssertEqual(presentations.last?.actions.first { $0.id == .approveEngine }?.keyboardShortcut, .optionReturn)
         XCTAssertTrue(try store.elements(type: .autoApprovedSecretRequest).isEmpty)
 

@@ -76,9 +76,9 @@ func TestRequestBodyInspectionLimitsAndReplay(t *testing.T) {
 			r.Body = original
 
 			inspection := inspectRequestBodyForTest(t, r)
-			var wantNames []string
+			var wantNames []approvalSecret
 			if tt.scan {
-				wantNames = []string{"body"}
+				wantNames = []approvalSecret{{Name: "body", Location: secretInBody}}
 			}
 			if names := findRequestSecrets(r, inspection); !slices.Equal(names, wantNames) {
 				t.Fatalf("secrets = %v, want %v", names, wantNames)

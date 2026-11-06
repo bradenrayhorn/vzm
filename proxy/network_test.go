@@ -262,7 +262,7 @@ func TestPrivateNetworkHTTPS(t *testing.T) {
 			connects.Add(1)
 		} else {
 			requests.Add(1)
-			if len(r.Secrets) != 1 || r.Secrets[0] != "token" {
+			if len(r.Secrets) != 1 || r.Secrets[0] != (approvalSecret{Name: "token", Location: secretInAuthorizationHeader}) {
 				t.Errorf("secrets = %v", r.Secrets)
 			}
 		}

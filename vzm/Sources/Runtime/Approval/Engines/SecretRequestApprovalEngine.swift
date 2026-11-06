@@ -57,10 +57,10 @@ final class SecretRequestApprovalEngine: BaseApprovalEngine {
               !request.method.isEmpty,
               !request.url.isEmpty,
               !request.secrets.isEmpty,
-              request.secrets.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+              request.secretNames.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         else { return nil }
 
-        let rule = ApprovalRule(method: request.method, url: request.url, secrets: Set(request.secrets).sorted())
+        let rule = ApprovalRule(method: request.method, url: request.url, secrets: Set(request.secretNames).sorted())
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(rule) else { return nil }

@@ -12,7 +12,7 @@ private final class QueueObserver: DenyRule {
         set { lock.withLock { callback = newValue } }
     }
 
-    func matches(_ request: ProxyApprovalRequest) -> Bool {
+    func shouldDeny(_ request: ProxyApprovalRequest) -> Bool {
         observed(request)
         return false
     }

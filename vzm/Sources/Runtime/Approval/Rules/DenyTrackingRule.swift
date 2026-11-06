@@ -8,7 +8,7 @@ final class DenyTrackingRule: DenyRule {
         "config.liquibase.com"
     ]
 
-    func matches(_ request: ProxyApprovalRequest) -> Bool {
+    func shouldDeny(_ request: ProxyApprovalRequest) -> Bool {
         Self.blockedDomains.contains(DomainName.normalize(request.domain))
     }
 }

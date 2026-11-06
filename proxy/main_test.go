@@ -121,8 +121,8 @@ func TestBasicAuthSecretsAreScannedAndSubstituted(t *testing.T) {
 
 	inspection := inspectRequestBodyForTest(t, r)
 	secrets := findRequestSecrets(r, inspection)
-	if len(secrets) != 1 || secrets[0] != "basic-secret" {
-		t.Fatalf("findRequestSecrets() = %#v, want [basic-secret]", secrets)
+	if len(secrets) != 1 || secrets[0] != (approvalSecret{Name: "basic-secret", Location: secretInAuthorizationHeader}) {
+		t.Fatalf("findRequestSecrets() = %#v, want basic-secret in authorizationHeader", secrets)
 	}
 
 	applySecretSubstitutions(r, inspection, map[string]string{"basic-secret": "s3cr3t"})

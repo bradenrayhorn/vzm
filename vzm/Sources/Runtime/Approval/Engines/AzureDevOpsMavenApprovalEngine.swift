@@ -10,7 +10,7 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
 
         func allows(_ request: ProxyApprovalRequest) -> Bool {
             headers.isSuperset(of: request.headers.map(AzureDevOpsMavenApprovalEngine.headerFingerprint))
-                && secrets.isSuperset(of: request.secrets)
+                && secrets.isSuperset(of: request.secretNames)
         }
     }
 
@@ -65,7 +65,7 @@ final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
         guard let prefix = repositoryPrefixIfMatchingRequest(request) else { return }
         var consent = approvedFeeds[prefix] ?? Consent()
         consent.headers.formUnion(request.headers.map(Self.headerFingerprint))
-        consent.secrets.formUnion(request.secrets)
+        consent.secrets.formUnion(request.secretNames)
         approvedFeeds[prefix] = consent
 
         let feed = StoredFeed(prefix: prefix, headers: consent.headers.sorted(), secrets: consent.secrets.sorted())

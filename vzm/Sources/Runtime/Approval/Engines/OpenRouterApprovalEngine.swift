@@ -20,7 +20,7 @@ final class OpenRouterApprovalEngine: BaseApprovalEngine {
 
     override func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
         guard matches(request) else { return .notApplicable }
-        if approvedSecrets.isSuperset(of: request.secrets)
+        if approvedSecrets.isSuperset(of: request.secretNames)
             && approvedHeaders.isSuperset(of: headersForApproval(request)) {
             return .approved
         }
@@ -41,7 +41,7 @@ final class OpenRouterApprovalEngine: BaseApprovalEngine {
 
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
         guard matches(request) else { return }
-        approvedSecrets.formUnion(request.secrets)
+        approvedSecrets.formUnion(request.secretNames)
         approvedHeaders.formUnion(headersForApproval(request))
     }
 
@@ -66,8 +66,8 @@ final class OpenRouterApprovalEngine: BaseApprovalEngine {
         let secret = String(credential.dropFirst(5).dropLast())
         guard !secret.isEmpty, secret == secret.trimmingCharacters(in: .whitespacesAndNewlines),
               !secret.contains(where: { "{}\r\n".contains($0) }),
-              request.secrets.contains(secret),
-              request.secrets.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+              request.secretNames.contains(secret),
+              request.secretNames.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         else { return false }
         return true
     }

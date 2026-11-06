@@ -11,7 +11,7 @@ final class AzureDevOpsNpmApprovalEngine: BaseApprovalEngine {
     override func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
         guard matches(request) else { return .notApplicable }
         if approvedHeaders.isSuperset(of: request.headers)
-            && approvedSecrets.isSuperset(of: request.secrets) {
+            && approvedSecrets.isSuperset(of: request.secretNames) {
             return .approved
         }
         return .needsConsent(.default)
@@ -20,7 +20,7 @@ final class AzureDevOpsNpmApprovalEngine: BaseApprovalEngine {
     override func onEngineApproved(_ request: ProxyApprovalRequest) {
         guard matches(request) else { return }
         approvedHeaders.formUnion(request.headers)
-        approvedSecrets.formUnion(request.secrets)
+        approvedSecrets.formUnion(request.secretNames)
     }
 
     private func matches(_ request: ProxyApprovalRequest) -> Bool {

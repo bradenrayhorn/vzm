@@ -133,7 +133,23 @@ type approvalRequest struct {
 	URL     string           `json:"url"`
 	Headers []approvalHeader `json:"headers"`
 	Body    *approvalBody    `json:"body,omitempty"`
-	Secrets []string         `json:"secrets"`
+	Secrets []approvalSecret `json:"secrets"`
+}
+
+type secretLocation string
+
+const (
+	secretInAuthorizationHeader secretLocation = "authorizationHeader"
+	secretInHeader              secretLocation = "header"
+	secretInURLPath             secretLocation = "urlPath"
+	secretInURLQuery            secretLocation = "urlQuery"
+	secretInBody                secretLocation = "body"
+)
+
+// One entry per distinct name/location pair, not just per secret name.
+type approvalSecret struct {
+	Name     string         `json:"name"`
+	Location secretLocation `json:"location"`
 }
 
 type approvalHeader struct {
@@ -177,7 +193,7 @@ func askForApprovalContext(ctx context.Context, request approvalRequest) approva
 		request.Headers = []approvalHeader{}
 	}
 	if request.Secrets == nil {
-		request.Secrets = []string{}
+		request.Secrets = []approvalSecret{}
 	}
 
 	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", controlUnixPath)
@@ -635,10 +651,10 @@ func serveHTTPRequest(conn net.Conn, bufReader *bufio.Reader, innerReq *http.Req
 		return false
 	}
 
-	secretNames := findRequestSecrets(innerReq, inspection)
+	secrets := findRequestSecrets(innerReq, inspection)
 
 	// Never send host-held secrets over an unencrypted link.
-	if scheme != "https" && len(secretNames) != 0 {
+	if scheme != "https" && len(secrets) != 0 {
 		_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return false
 	}
@@ -656,7 +672,7 @@ func serveHTTPRequest(conn net.Conn, bufReader *bufio.Reader, innerReq *http.Req
 		URL:     reqURL,
 		Headers: approvalHeadersForRequest(innerReq),
 		Body:    approvalBodyForRequest(innerReq, inspection),
-		Secrets: secretNames,
+		Secrets: secrets,
 	})
 	if !approval.Approved {
 		conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
@@ -946,62 +962,56 @@ func approvalDisplayBytes(data []byte) (string, bool) {
 	return b.String(), true
 }
 
-func findRequestSecrets(r *http.Request, inspection requestBodyInspection) []string {
-	secretSet := map[string]struct{}{}
-
-	collectURLSecretNames(r.URL, secretSet)
-
+// Scan the same fields that applySecretSubstitutions can rewrite. Inspection
+// is independent of the body display limit; uninspected bodies are not rewritten.
+func findRequestSecrets(r *http.Request, inspection requestBodyInspection) []approvalSecret {
+	secretSet := map[approvalSecret]struct{}{}
+	if r.URL != nil {
+		collectSecrets(r.URL.Path, secretInURLPath, secretSet)
+		collectSecrets(r.URL.RawPath, secretInURLPath, secretSet)
+		for key, values := range r.URL.Query() {
+			collectSecrets(key, secretInURLQuery, secretSet)
+			for _, value := range values {
+				collectSecrets(value, secretInURLQuery, secretSet)
+			}
+		}
+	}
 	for name, values := range r.Header {
+		location := secretInHeader
+		if strings.EqualFold(name, "Authorization") {
+			location = secretInAuthorizationHeader
+		}
 		for _, value := range values {
-			collectSecretNames(value, secretSet)
-			collectHeaderSecrets(name, value, secretSet)
+			collectSecrets(value, location, secretSet)
+			if location == secretInAuthorizationHeader {
+				if decoded, _, ok := decodeBasicAuthValue(value); ok {
+					collectSecrets(string(decoded), location, secretSet)
+				}
+			}
 		}
 	}
-
 	if inspection.inspected {
-		collectSecretNames(string(inspection.body), secretSet)
+		collectSecrets(string(inspection.body), secretInBody, secretSet)
 	}
-	return sortedSecretNames(secretSet)
-}
-
-func collectURLSecretNames(u *url.URL, secretSet map[string]struct{}) {
-	if u == nil {
-		return
-	}
-
-	collectSecretNames(u.Path, secretSet)
-	collectSecretNames(u.RawPath, secretSet)
-	for key, values := range u.Query() {
-		collectSecretNames(key, secretSet)
-		for _, value := range values {
-			collectSecretNames(value, secretSet)
+	secrets := slices.Collect(maps.Keys(secretSet))
+	slices.SortFunc(secrets, func(a, b approvalSecret) int {
+		if order := strings.Compare(a.Name, b.Name); order != 0 {
+			return order
 		}
-	}
+		return strings.Compare(string(a.Location), string(b.Location))
+	})
+	return secrets
 }
 
-func collectSecretNames(text string, secretSet map[string]struct{}) {
+func collectSecrets(text string, location secretLocation, secretSet map[approvalSecret]struct{}) {
 	for _, match := range secretPattern.FindAllStringSubmatch(text, -1) {
 		if len(match) < 2 {
 			continue
 		}
-		name := strings.TrimSpace(match[1])
-		if name != "" {
-			secretSet[name] = struct{}{}
+		if name := strings.TrimSpace(match[1]); name != "" {
+			secretSet[approvalSecret{Name: name, Location: location}] = struct{}{}
 		}
 	}
-}
-
-func collectHeaderSecrets(name, value string, secretSet map[string]struct{}) {
-	if !strings.EqualFold(name, "Authorization") {
-		return
-	}
-	if decoded, _, ok := decodeBasicAuthValue(value); ok {
-		collectSecretNames(string(decoded), secretSet)
-	}
-}
-
-func sortedSecretNames(secretSet map[string]struct{}) []string {
-	return slices.Sorted(maps.Keys(secretSet))
 }
 
 func applySecretSubstitutions(r *http.Request, inspection requestBodyInspection, substitutions map[string]string) {
