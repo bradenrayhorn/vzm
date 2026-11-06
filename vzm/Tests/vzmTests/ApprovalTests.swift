@@ -519,6 +519,174 @@ final class ApprovalTests: XCTestCase {
         await assertDecision(service, request("p2ovsblobprodcus312.blob.core.windows.net:443", type: "CONNECT", method: "CONNECT"), false)
     }
 
+    func testNpmPacoteHeadersInAuto() async throws {
+        mode.select(.auto)
+        let service = try service(engines: [NpmApprovalEngine()])
+        let common = [
+            ProxyApprovalHeader(name: "Npm-Auth-Type", value: "web"),
+            ProxyApprovalHeader(name: "Npm-Command", value: "install"),
+            ProxyApprovalHeader(name: "Pacote-Version", value: "19.0.2"),
+        ]
+        for package in ["mime-types", "math-intrinsics", "@scope/package"] {
+            var metadata = request("registry.npmjs.org/\(package)")
+            metadata.headers = common + [
+                ProxyApprovalHeader(name: "Pacote-Pkg-Id", value: "registry:\(package)"),
+                ProxyApprovalHeader(name: "Pacote-Req-Type", value: "packument"),
+            ]
+            await assertDecision(service, metadata, true)
+            let name = String(package.split(separator: "/").last!)
+            var tarball = request("registry.npmjs.org/\(package)/-/\(name)-1.1.0.tgz")
+            tarball.headers = common + [
+                ProxyApprovalHeader(name: "Pacote-Pkg-Id", value: "remote:\(package)@https://\(tarball.url)"),
+                ProxyApprovalHeader(name: "Pacote-Req-Type", value: "tarball"),
+                ProxyApprovalHeader(name: "Pacote-Integrity", value: "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g=="),
+            ]
+            await assertDecision(service, tarball, true)
+            tarball.headers[tarball.headers.count - 1].value = "sha512-" + Data(repeating: 1, count: 64).base64EncodedString()
+            tarball.headers[0].value = "legacy"
+            tarball.headers[1].value = "exec"
+            tarball.headers[common.count].value = "registry:\(package)@https://\(tarball.url)"
+            tarball.headers += [
+                ProxyApprovalHeader(name: "Npm-Scope", value: "@project-scope"),
+                ProxyApprovalHeader(name: "Npm-Session", value: "0123456789abcdef"),
+            ]
+            await assertDecision(service, tarball, true)
+            tarball.headers[tarball.headers.count - 1].value = "fedcba9876543210"
+            await assertDecision(service, tarball, true)
+        }
+        let presentations = await prompts.presentations
+        XCTAssertTrue(presentations.isEmpty)
+    }
+
+    func testNpmPacoteHeaderValidation() {
+        let engine = NpmApprovalEngine()
+        let metadataURL = "registry.npmjs.org/@scope%2Fpackage"
+        let tarballURL = "registry.npmjs.org/@scope/package/-/package-1.2.3.tgz"
+        let digest = Data(repeating: 0, count: 64).base64EncodedString()
+        let valid: [(String, String)] = [
+            ("Npm-Auth-Type", "web"), ("Npm-Auth-Type", "legacy"),
+            ("Npm-Command", "install"), ("Npm-Command", "ci"),
+            ("Npm-Command", "exec"), ("Npm-Command", "update"), ("Npm-Command", "view"),
+            ("Npm-Command", "outdated"), ("Npm-Command", "pack"), ("Npm-Command", "cache"),
+            ("Npm-Command", "dedupe"), ("Npm-Command", "prune"), ("Npm-Command", "diff"),
+            ("Npm-Command", "init"), ("Npm-Command", "install-test"), ("Npm-Command", "install-ci-test"),
+            ("Npm-Scope", "@scope"), ("Npm-Scope", "@different-project.scope_1"),
+            ("Npm-Scope", "@" + String(repeating: "a", count: 128)),
+            ("Npm-Session", "0123456789abcdef"), ("Npm-Session", "fedcba9876543210"),
+            ("Pacote-Req-Type", "packument"), ("Pacote-Req-Type", "tarball"),
+            ("Pacote-Version", "19.0.2"), ("Pacote-Version", "20.1.0"),
+        ]
+        // Both request types are allowed regardless of the package path kind.
+        for url in [metadataURL, tarballURL] {
+            for (name, value) in valid {
+                var r = request(url)
+                r.headers = [ProxyApprovalHeader(name: " \(name.uppercased()) ", value: " \(value) ")]
+                XCTAssertTrue(engine.evaluate(r).isApproved, "\(name): \(value)")
+                XCTAssertTrue(engine.headersForApproval(r).isEmpty)
+                XCTAssertFalse(ApprovalHeaderMasker.isSafe(r.headers[0], in: r))
+            }
+        }
+        for (url, packageID) in [
+            (metadataURL, "registry:@scope/package"),
+            ("registry.npmjs.org/@scope%2fpackage", "registry:@scope/package"),
+            ("registry.npmjs.org/@scope/package", "registry:@scope/package"),
+            (tarballURL, "remote:@scope/package@https://\(tarballURL)"),
+            (tarballURL, "registry:@scope/package@https://\(tarballURL)"),
+            ("registry.npmjs.org/package/-/package-1.0.tgz", "registry:package@https://registry.npmjs.org/package/-/package-1.0.tgz"),
+        ] {
+            var r = request(url)
+            r.headers = [ProxyApprovalHeader(name: "Pacote-Pkg-Id", value: packageID)]
+            XCTAssertTrue(engine.evaluate(r).isApproved, packageID)
+        }
+        let invalid: [(String, String)] = [
+            ("Npm-Auth-Type", "web-secret"), ("Npm-Auth-Type", ""),
+            ("Npm-Command", "publish"), ("Npm-Command", "install secret"),
+            ("Npm-Command", "exec\nsecret"), ("Npm-Command", "unknown"),
+            ("Npm-Scope", ""), ("Npm-Scope", "scope"), ("Npm-Scope", "@"),
+            ("Npm-Scope", "@@scope"), ("Npm-Scope", "@."), ("Npm-Scope", "@.."),
+            ("Npm-Scope", "@scope/package"), ("Npm-Scope", "@scope%2fpackage"),
+            ("Npm-Scope", "@scope,other"), ("Npm-Scope", "@scope secret"),
+            ("Npm-Scope", "@scope\nsecret"), ("Npm-Scope", "@" + String(repeating: "a", count: 129)),
+            ("Npm-Session", ""), ("Npm-Session", "0123456789abcde"),
+            ("Npm-Session", "0123456789abcdef0"), ("Npm-Session", "0123456789abcdeg"),
+            ("Npm-Session", "0123456789ABCDEF"), ("Npm-Session", "01234567 9abcdef"),
+            ("Npm-Session", "01234567\n9abcdef"), ("Npm-Session", "0123456789abcdef,0123456789abcdef"),
+            ("Pacote-Req-Type", "manifest"), ("Pacote-Req-Type", "tarball,packument"),
+            ("Pacote-Version", "19.0.2-secret"), ("Pacote-Version", "19.0"),
+            ("Pacote-Version", "123456.0.0"), ("Pacote-Version", "19.0.2\nsecret"),
+            ("Pacote-Pkg-Id", "registry:other"),
+            ("Pacote-Pkg-Id", "remote:other@https://\(tarballURL)"),
+            ("Pacote-Pkg-Id", "remote:@scope/package@https://example.com/package.tgz"),
+            ("Pacote-Pkg-Id", "remote:@scope/package@http://\(tarballURL)"),
+            ("Pacote-Pkg-Id", "remote:@scope/package@https://\(tarballURL)?secret=data"),
+            ("Pacote-Pkg-Id", "registry:other@https://\(tarballURL)"),
+            ("Pacote-Pkg-Id", "registry:@scope/package@https://example.com/package.tgz"),
+            ("Pacote-Pkg-Id", "registry:@scope/package@http://\(tarballURL)"),
+            ("Pacote-Pkg-Id", "registry:@scope/package@https://\(tarballURL)?secret=data"),
+            ("Pacote-Pkg-Id", "registry:@scope/package@https://registry.npmjs.org/@scope/package/-/package-9.9.9.tgz"),
+            ("Pacote-Integrity", "sha256-" + digest),
+            ("Pacote-Integrity", "sha512-" + Data(repeating: 0, count: 63).base64EncodedString()),
+            ("Pacote-Integrity", "sha512-" + Data(repeating: 0, count: 65).base64EncodedString()),
+            ("Pacote-Integrity", "sha512-" + String(digest.dropLast(2))),
+            ("Pacote-Integrity", "sha512-" + String(digest.dropLast(3)) + "B=="),
+            ("Pacote-Integrity", "sha512-" + digest + " secret"),
+            ("Pacote-Integrity", "sha512-" + digest + " sha512-" + digest),
+            ("Pacote-Integrity", "sha512-" + String(repeating: "!", count: 88)),
+            ("Pacote-Unknown", "data"), ("Authorization", "Bearer data"),
+        ]
+        for (name, value) in invalid {
+            var r = request(tarballURL)
+            r.headers = [ProxyApprovalHeader(name: name, value: value)]
+            XCTAssertFalse(engine.evaluate(r).isApproved, "\(name): \(value)")
+            XCTAssertEqual(engine.headersForApproval(r), r.headers)
+        }
+        var metadata = request(metadataURL)
+        for header in [
+            ProxyApprovalHeader(name: "Pacote-Integrity", value: "sha512-" + digest),
+            ProxyApprovalHeader(name: "Pacote-Pkg-Id", value: "remote:@scope/package@https://\(tarballURL)"),
+            ProxyApprovalHeader(name: "Pacote-Pkg-Id", value: "registry:@scope/package@https://\(tarballURL)"),
+        ] {
+            metadata.headers = [header]
+            XCTAssertFalse(engine.evaluate(metadata).isApproved)
+        }
+        var tarball = request(tarballURL)
+        tarball.headers = [ProxyApprovalHeader(name: "Pacote-Pkg-Id", value: "registry:@scope/package")]
+        XCTAssertFalse(engine.evaluate(tarball).isApproved)
+    }
+
+    func testNpmPacoteFilteringIsScopedToMatchingRequests() {
+        let engine = NpmApprovalEngine()
+        let headers = [
+            ProxyApprovalHeader(name: "Npm-Command", value: "exec"),
+            ProxyApprovalHeader(name: "Npm-Auth-Type", value: "legacy"),
+            ProxyApprovalHeader(name: "Npm-Scope", value: "@scope"),
+            ProxyApprovalHeader(name: "Npm-Session", value: "0123456789abcdef"),
+            ProxyApprovalHeader(name: "Pacote-Pkg-Id", value: "registry:package@https://registry.npmjs.org/package/-/package-1.0.tgz"),
+        ]
+        var requests = [
+            request("example.com/package"),
+            request("registry.npmjs.org/package?secret=data"),
+            request("registry.npmjs.org/-/npm/v1/security/advisories/bulk"),
+            request("registry.npmjs.org/package", method: "POST"),
+            request("registry.npmjs.org/package", type: "CONNECT"),
+        ]
+        var withBody = request("registry.npmjs.org/package")
+        withBody.body = ProxyApprovalBody(text: "data", warning: "")
+        requests.append(withBody)
+        var withSecret = request("registry.npmjs.org/package")
+        withSecret.secrets = ["PAT"]
+        requests.append(withSecret)
+        for var r in requests {
+            r.headers = headers
+            XCTAssertFalse(engine.evaluate(r).isApproved)
+            XCTAssertEqual(engine.headersForApproval(r), headers)
+        }
+        var valid = request("registry.npmjs.org/package")
+        valid.headers = Array(headers.dropLast()) + [ProxyApprovalHeader(name: "X-Custom", value: "data")]
+        XCTAssertFalse(engine.evaluate(valid).isApproved)
+        XCTAssertEqual(engine.headersForApproval(valid), [valid.headers.last!])
+    }
+
     func testNpmOrdinaryApprovalDoesNotEstablishHeaderConsent() async throws {
         let service = try service(engines: [NpmApprovalEngine()])
         var r = request("registry.npmjs.org/package")
