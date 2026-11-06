@@ -68,7 +68,7 @@ var (
 )
 
 const (
-	maxSecretScanBodySize  int64 = 1 << 20
+	maxInspectionBodySize  int64 = 1 << 20
 	maxApprovalBodySize    int64 = 64 << 10
 	maxGitProxyConnections       = 32
 	maxRawTCPConnections         = 32
@@ -760,12 +760,14 @@ func serveHTTPRequest(conn net.Conn, bufReader *bufio.Reader, innerReq *http.Req
 		return false
 	}
 
-	secretNames, err := findRequestSecrets(innerReq)
+	inspection, err := inspectRequestBody(innerReq)
 	if err != nil {
 		log.Println("Error scanning request for secrets:", err)
 		conn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 		return false
 	}
+
+	secretNames := findRequestSecrets(innerReq, inspection)
 
 	// Never send host-held secrets over an unencrypted link.
 	if scheme != "https" && len(secretNames) != 0 {
@@ -785,18 +787,14 @@ func serveHTTPRequest(conn net.Conn, bufReader *bufio.Reader, innerReq *http.Req
 		Method:  innerReq.Method,
 		URL:     reqURL,
 		Headers: approvalHeadersForRequest(innerReq),
-		Body:    approvalBodyForRequest(innerReq),
+		Body:    approvalBodyForRequest(innerReq, inspection),
 		Secrets: secretNames,
 	})
 	if !approval.Approved {
 		conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 		return false
 	}
-	if err := applySecretSubstitutions(innerReq, approval.Substitutions); err != nil {
-		log.Println("Error substituting request secrets:", err)
-		conn.Write([]byte("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-		return false
-	}
+	applySecretSubstitutions(innerReq, inspection, approval.Substitutions)
 
 	if approvalType == "WEBSOCKET" {
 		if err := proxyWebSocketConnection(conn, bufReader, innerReq, targetHost, targetPort, scheme); err != nil {
@@ -1004,7 +1002,7 @@ func approvalHeaderForDisplay(name, value string) approvalHeader {
 	return approvalHeader{Name: displayName, Value: displayValue}
 }
 
-func approvalBodyForRequest(r *http.Request) *approvalBody {
+func approvalBodyForRequest(r *http.Request, inspection requestBodyInspection) *approvalBody {
 	if r.Body == nil || r.Body == http.NoBody {
 		return nil
 	}
@@ -1020,14 +1018,12 @@ func approvalBodyForRequest(r *http.Request) *approvalBody {
 		return warn("Request body has unknown length or is streaming; body was not shown.")
 	}
 
-	body, tooLarge, err := readApprovalBody(r)
-	if err != nil {
-		return warn("Request body could not be read for approval.")
-	}
-	if tooLarge {
+	// Display size is a presentation limit; it never triggers a separate read.
+	if r.ContentLength > maxInspectionBodySize || int64(len(inspection.body)) > maxApprovalBodySize {
 		return warn("Request body is too large to show.")
 	}
 
+	body := inspection.body
 	if len(body) == 0 {
 		return nil
 	}
@@ -1046,22 +1042,6 @@ func approvalBodyForRequest(r *http.Request) *approvalBody {
 		approval.Warning = "Request body contains non-printable or non-ASCII bytes; showing escaped bytes."
 	}
 	return approval
-}
-
-func readApprovalBody(r *http.Request) ([]byte, bool, error) {
-	originalBody := r.Body
-	body, err := io.ReadAll(io.LimitReader(originalBody, maxApprovalBodySize+1))
-	tooLarge := int64(len(body)) > maxApprovalBodySize
-	if err != nil || tooLarge {
-		r.Body = struct {
-			io.Reader
-			io.Closer
-		}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
-		return body, tooLarge, err
-	}
-	originalBody.Close()
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return body, false, nil
 }
 
 func approvalDisplayBytes(data []byte) (string, bool) {
@@ -1098,7 +1078,7 @@ func approvalDisplayBytes(data []byte) (string, bool) {
 	return b.String(), true
 }
 
-func findRequestSecrets(r *http.Request) ([]string, error) {
+func findRequestSecrets(r *http.Request, inspection requestBodyInspection) []string {
 	secretSet := map[string]struct{}{}
 
 	collectURLSecretNames(r.URL, secretSet)
@@ -1110,14 +1090,10 @@ func findRequestSecrets(r *http.Request) ([]string, error) {
 		}
 	}
 
-	body, inspected, err := readInspectableBody(r)
-	if err != nil {
-		return nil, err
+	if inspection.inspected {
+		collectSecretNames(string(inspection.body), secretSet)
 	}
-	if inspected {
-		collectSecretNames(string(body), secretSet)
-	}
-	return sortedSecretNames(secretSet), nil
+	return sortedSecretNames(secretSet)
 }
 
 func collectURLSecretNames(u *url.URL, secretSet map[string]struct{}) {
@@ -1160,9 +1136,9 @@ func sortedSecretNames(secretSet map[string]struct{}) []string {
 	return slices.Sorted(maps.Keys(secretSet))
 }
 
-func applySecretSubstitutions(r *http.Request, substitutions map[string]string) error {
+func applySecretSubstitutions(r *http.Request, inspection requestBodyInspection, substitutions map[string]string) {
 	if len(substitutions) == 0 {
-		return nil
+		return
 	}
 
 	applyURLSecretSubstitutions(r.URL, substitutions)
@@ -1174,20 +1150,15 @@ func applySecretSubstitutions(r *http.Request, substitutions map[string]string) 
 		r.Header[key] = values
 	}
 
-	body, inspected, err := readInspectableBody(r)
-	if err != nil {
-		return err
-	}
-	if !inspected {
-		return nil
+	if !inspection.inspected {
+		return
 	}
 
-	rewritten := substituteSecretsBytes(body, substitutions)
+	rewritten := substituteSecretsBytes(inspection.body, substitutions)
 	r.Body = io.NopCloser(bytes.NewReader(rewritten))
 	r.ContentLength = int64(len(rewritten))
 	r.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))
 	r.TransferEncoding = nil
-	return nil
 }
 
 func applyURLSecretSubstitutions(u *url.URL, substitutions map[string]string) {
@@ -1216,33 +1187,38 @@ func applyURLSecretSubstitutions(u *url.URL, substitutions map[string]string) {
 	u.RawQuery = query.Encode()
 }
 
-func readInspectableBody(r *http.Request) ([]byte, bool, error) {
-	if r.Body == nil {
-		return nil, false, nil
-	}
-	if r.ContentLength < 0 || r.ContentLength > maxSecretScanBodySize || hasExpectContinue(r) {
-		return nil, false, nil
+// requestBodyInspection is a snapshot of the original request body, shared by
+// secret scanning, approval display, and substitution. An incomplete body must
+// never be scanned or rewritten; its consumed prefix is replayed for forwarding.
+type requestBodyInspection struct {
+	body      []byte
+	inspected bool // the entire body was buffered within the inspection limit
+}
+
+func inspectRequestBody(r *http.Request) (requestBodyInspection, error) {
+	if r.Body == nil || r.Body == http.NoBody || r.ContentLength < 0 ||
+		r.ContentLength > maxInspectionBodySize || hasExpectContinue(r) {
+		return requestBodyInspection{}, nil
 	}
 
 	originalBody := r.Body
-	body, err := io.ReadAll(io.LimitReader(originalBody, maxSecretScanBodySize+1))
+	body, err := io.ReadAll(io.LimitReader(originalBody, maxInspectionBodySize+1))
 	if err != nil {
-		return nil, false, err
+		// Every attempted inspection must succeed before asking for approval.
+		return requestBodyInspection{}, err
 	}
-	if int64(len(body)) > maxSecretScanBodySize {
+	inspected := int64(len(body)) <= maxInspectionBodySize
+	if inspected {
+		originalBody.Close()
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	} else {
 		r.Body = struct {
 			io.Reader
 			io.Closer
-		}{
-			Reader: io.MultiReader(bytes.NewReader(body), originalBody),
-			Closer: originalBody,
-		}
-		return nil, false, nil
+		}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
 	}
 
-	originalBody.Close()
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return body, true, nil
+	return requestBodyInspection{body: body, inspected: inspected}, nil
 }
 
 func substituteSecrets(text string, substitutions map[string]string) string {

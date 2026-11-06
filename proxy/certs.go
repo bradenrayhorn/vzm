@@ -9,7 +9,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"log"
 	"math/big"
 	"net"
 	"os"
@@ -186,10 +185,4 @@ func randomSerialNumber() (*big.Int, error) {
 		return randomSerialNumber()
 	}
 	return serial, nil
-}
-
-func init() {
-	if err := initCertificateAuthority(); err != nil {
-		log.Printf("proxy certificate authority initialization failed: %v", err)
-	}
 }

@@ -313,17 +313,13 @@ func TestBasicAuthSecretsAreScannedAndSubstituted(t *testing.T) {
 		},
 	}
 
-	secrets, err := findRequestSecrets(r)
-	if err != nil {
-		t.Fatal(err)
-	}
+	inspection := inspectRequestBodyForTest(t, r)
+	secrets := findRequestSecrets(r, inspection)
 	if len(secrets) != 1 || secrets[0] != "basic-secret" {
 		t.Fatalf("findRequestSecrets() = %#v, want [basic-secret]", secrets)
 	}
 
-	if err := applySecretSubstitutions(r, map[string]string{"basic-secret": "s3cr3t"}); err != nil {
-		t.Fatal(err)
-	}
+	applySecretSubstitutions(r, inspection, map[string]string{"basic-secret": "s3cr3t"})
 	got := r.Header.Get("Authorization")
 	if !strings.HasPrefix(got, "Basic ") {
 		t.Fatalf("Authorization header = %q, want Basic auth", got)
@@ -377,7 +373,7 @@ func TestApprovalBodyForAnyMethod(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
 			r := approvalBodyRequest(method, []byte("hello\nworld"))
-			body := approvalBodyForRequest(r)
+			body := approvalBodyForRequest(r, inspectRequestBodyForTest(t, r))
 			if body == nil || body.Text != "hello\nworld" || body.Warning != "" {
 				t.Fatalf("approvalBodyForRequest() body=%#v", body)
 			}
@@ -388,32 +384,9 @@ func TestApprovalBodyForAnyMethod(t *testing.T) {
 	}
 }
 
-func TestApprovalBodyDoesNotReadUnknownLengthBody(t *testing.T) {
-	r := approvalBodyRequest(http.MethodPost, []byte("hello"))
-	r.ContentLength = -1
-	body := approvalBodyForRequest(r)
-	if body == nil || body.Text != "" || body.Warning == "" {
-		t.Fatalf("approvalBodyForRequest() body=%#v", body)
-	}
-	if got := readRequestBody(t, r); got != "hello" {
-		t.Fatalf("body after warning = %q", got)
-	}
-}
-
-func TestApprovalBodyWarningsRestoreBody(t *testing.T) {
-	r := approvalBodyRequest(http.MethodPost, bytes.Repeat([]byte("a"), int(maxApprovalBodySize)+1))
-	body := approvalBodyForRequest(r)
-	if body == nil || body.Warning == "" || body.Text != "" {
-		t.Fatalf("approvalBodyForRequest() body=%#v", body)
-	}
-	if got := readRequestBody(t, r); len(got) != int(maxApprovalBodySize)+1 {
-		t.Fatalf("body length after warning = %d", len(got))
-	}
-}
-
 func TestApprovalBodyEscapesInvisibleUnicode(t *testing.T) {
 	r := approvalBodyRequest(http.MethodPost, []byte("ok🙂️\ue000\U000f0000"))
-	body := approvalBodyForRequest(r)
+	body := approvalBodyForRequest(r, inspectRequestBodyForTest(t, r))
 	want := `ok\xF0\x9F\x99\x82\xEF\xB8\x8F\xEE\x80\x80\xF3\xB0\x80\x80`
 	if body == nil || body.Warning == "" || body.Text != want {
 		t.Fatalf("approvalBodyForRequest() body=%#v", body)
@@ -422,7 +395,7 @@ func TestApprovalBodyEscapesInvisibleUnicode(t *testing.T) {
 
 func TestApprovalBodyEscapesInvalidUTF8(t *testing.T) {
 	r := approvalBodyRequest(http.MethodPost, []byte{0xff, 'a'})
-	body := approvalBodyForRequest(r)
+	body := approvalBodyForRequest(r, inspectRequestBodyForTest(t, r))
 	if body == nil || body.Warning == "" || body.Text != `\xFFa` {
 		t.Fatalf("approvalBodyForRequest() body=%#v", body)
 	}

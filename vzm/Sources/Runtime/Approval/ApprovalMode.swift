@@ -4,14 +4,6 @@ enum ApprovalMode: Equatable, Sendable {
     case strict
     case auto
     case approveEverything(until: Date)
-
-    var label: String {
-        switch self {
-        case .strict: "Strict"
-        case .auto: "Auto"
-        case .approveEverything: "Approve Everything"
-        }
-    }
 }
 
 /// Runtime-only policy shared by the menu and approval service.
