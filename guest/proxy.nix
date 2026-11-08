@@ -42,15 +42,17 @@ in
 
   config = {
     environment.variables = forcedCertProxyEnv;
+    environment.etc = {
+      "ssl/certs/ca-certificates.crt".source = lib.mkForce caBundle;
+      "ssl/certs/ca-bundle.crt".source = lib.mkForce caBundle;
+      "pki/tls/certs/ca-bundle.crt".source = lib.mkForce caBundle;
+    };
+
     nix.settings.extra-sandbox-paths = [
       caBundle
       "/run/vzm/mitm-ca.crt.pem"
     ]
     ++ lib.optional cfg.java.enable javaTruststore;
-
-    security.pki.certificateFiles = [
-      caBundle
-    ];
 
     # Preserve CA trust for root-side nixos-rebuild fetches as well.
     security.sudo.extraConfig = ''
@@ -86,7 +88,7 @@ in
         done
 
         install -m 0644 /run/vzm/mitm-ca.crt.pem.tmp /run/vzm/mitm-ca.crt.pem
-        cat ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt /run/vzm/mitm-ca.crt.pem.tmp > /run/vzm/ca-bundle.pem.tmp
+        cat ${config.security.pki.caBundle} /run/vzm/mitm-ca.crt.pem.tmp > /run/vzm/ca-bundle.pem.tmp
         install -m 0644 /run/vzm/ca-bundle.pem.tmp /run/vzm/ca-bundle.pem
         rm -f /run/vzm/ca-bundle.pem.tmp
 
