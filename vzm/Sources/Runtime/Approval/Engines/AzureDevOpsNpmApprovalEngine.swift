@@ -4,6 +4,7 @@ import Foundation
 /// (unlike Maven's persisted per-feed consent).
 final class AzureDevOpsNpmApprovalEngine: BaseApprovalEngine {
     override var name: String { "AzureDevOpsNpm" }
+    override var activityGroup: EngineActivityGroup? { .packages }
 
     private var approvedHeaders: Set<ProxyApprovalHeader> = []
     private var approvedSecrets: Set<String> = []

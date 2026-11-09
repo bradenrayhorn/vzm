@@ -3,6 +3,7 @@ import Foundation
 /// Recognizes the read-only Docker Hub image-pull protocol in Auto.
 final class DockerHubApprovalEngine: PatternApprovalEngine {
     override var name: String { "DockerHub" }
+    override var activityGroup: EngineActivityGroup? { .containers }
 
     private static let registryPathRegex = try! NSRegularExpression(
         pattern: #"^/v2/(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)+(?:manifests/(?:sha256:[0-9a-f]{64}|[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})|(?:blobs|referrers)/sha256:[0-9a-f]{64})$"#

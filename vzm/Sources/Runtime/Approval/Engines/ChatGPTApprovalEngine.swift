@@ -2,6 +2,7 @@ import Foundation
 
 final class ChatGPTApprovalEngine: BaseApprovalEngine {
     override var name: String { "ChatGPT" }
+    override var activityGroup: EngineActivityGroup? { .llm }
 
     private var approvedAccountIDs: Set<String> = []
 

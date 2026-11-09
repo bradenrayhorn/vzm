@@ -2,9 +2,14 @@ import Foundation
 
 protocol ApprovalEngine {
     var name: String { get }
+    var activityGroup: EngineActivityGroup? { get }
 
     func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation
     func onEngineApproved(_ request: ProxyApprovalRequest)
+}
+
+extension ApprovalEngine {
+    var activityGroup: EngineActivityGroup? { nil }
 }
 
 /// A matching hard-deny rule blocks the request before any approval policy.
@@ -99,6 +104,7 @@ enum EnginePrompt {
 
 open class BaseApprovalEngine: ApprovalEngine {
     open var name: String { String(describing: Self.self) }
+    var activityGroup: EngineActivityGroup? { nil }
 
     func evaluate(_ request: ProxyApprovalRequest) -> EngineEvaluation {
         .notApplicable

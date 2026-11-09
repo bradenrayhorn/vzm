@@ -4,6 +4,7 @@ import Foundation
 /// checks recognize the protocol; they do not prove that a request came from pi.
 final class OpenRouterApprovalEngine: BaseApprovalEngine {
     override var name: String { "OpenRouter" }
+    override var activityGroup: EngineActivityGroup? { .llm }
 
     private var approvedSecrets: Set<String> = []
     private var approvedHeaders: Set<ProxyApprovalHeader> = []

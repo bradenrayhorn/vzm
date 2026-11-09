@@ -2,6 +2,7 @@ import Foundation
 
 final class GradleDistributionApprovalEngine: PatternApprovalEngine {
     override var name: String { "GradleDistribution" }
+    override var activityGroup: EngineActivityGroup? { .packages }
 
     private static let urlRegexes: [NSRegularExpression] = [
         try! NSRegularExpression(

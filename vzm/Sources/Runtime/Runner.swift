@@ -110,6 +110,7 @@ class Runner {
         var notificationService: NotificationService?
 
         func stopRuntimeServices() async {
+            EngineActivityOverlayCoordinator.shared.detach()
             PortExposureCoordinator.shared.detach()
             notificationService?.stop()
             await portExposureService?.stop()
@@ -119,6 +120,7 @@ class Runner {
         do {
             try await proxyService.launch()
             try await machine.start()
+            EngineActivityOverlayCoordinator.shared.attach()
 
             Darwin.signal(SIGINT, SIG_IGN)
             let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)

@@ -5,6 +5,7 @@ import Foundation
 /// the identity of the guest program (such as Pup).
 final class DatadogApprovalEngine: BaseApprovalEngine, DenyRule {
     override var name: String { "Datadog" }
+    override var activityGroup: EngineActivityGroup? { .datadog }
 
     private static let apiHost = "api.datadoghq.com"
     private static let sdkKeyHeaders: Set<String> = ["dd-api-key", "dd-application-key"]

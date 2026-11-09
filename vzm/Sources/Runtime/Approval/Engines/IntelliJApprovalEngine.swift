@@ -4,6 +4,7 @@ import Foundation
 /// Account, AI, and arbitrary JetBrains web requests intentionally do not match.
 final class IntelliJApprovalEngine: PatternApprovalEngine {
     override var name: String { "IntelliJ" }
+    override var activityGroup: EngineActivityGroup? { .intellij }
 
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         request.type == "REQUEST"

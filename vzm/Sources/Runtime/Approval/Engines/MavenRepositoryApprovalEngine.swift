@@ -2,6 +2,7 @@ import Foundation
 
 final class MavenRepositoryApprovalEngine: PatternApprovalEngine {
     override var name: String { "MavenRepository" }
+    override var activityGroup: EngineActivityGroup? { .packages }
 
     private static let allowedHosts: Set<String> = [
         "plugins.gradle.org",

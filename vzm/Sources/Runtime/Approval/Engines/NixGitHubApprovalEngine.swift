@@ -2,6 +2,7 @@ import Foundation
 
 final class NixGitHubApprovalEngine: PatternApprovalEngine {
     override var name: String { "NixGitHub" }
+    override var activityGroup: EngineActivityGroup? { .nix }
 
     private static let urlRegexes: [NSRegularExpression] = [
         try! NSRegularExpression(pattern: #"^github\.com/[A-Za-z0-9-]{1,40}/[A-Za-z0-9-]{1,40}/archive/[0-9a-f]{40}\.tar\.gz$"#),

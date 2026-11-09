@@ -2,6 +2,7 @@ import Foundation
 
 final class NpmApprovalEngine: PatternApprovalEngine {
     override var name: String { "Npm" }
+    override var activityGroup: EngineActivityGroup? { .packages }
 
     private static let npmCommands: Set<String> = [
         "install", "ci", "exec", "update", "view", "outdated", "pack", "cache",

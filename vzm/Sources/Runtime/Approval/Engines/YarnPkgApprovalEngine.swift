@@ -2,6 +2,7 @@ import Foundation
 
 final class YarnPkgApprovalEngine: PatternApprovalEngine {
     override var name: String { "YarnPkg" }
+    override var activityGroup: EngineActivityGroup? { .packages }
 
     override func matches(_ request: ProxyApprovalRequest) -> Bool {
         guard request.type == "REQUEST", request.secrets.isEmpty,

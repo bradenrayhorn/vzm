@@ -3,6 +3,7 @@ import Foundation
 
 final class AzureDevOpsMavenApprovalEngine: BaseApprovalEngine {
     override var name: String { "AzureDevOpsMaven" }
+    override var activityGroup: EngineActivityGroup? { .packages }
 
     private struct Consent {
         var headers: Set<String> = []

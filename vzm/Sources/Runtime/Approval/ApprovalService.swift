@@ -42,6 +42,7 @@ actor ApprovalService {
     private let denyRules: [any DenyRule]
     private let engines: [any ApprovalEngine]
     private let modeState: ApprovalModeState
+    private let engineActivity: EngineActivityStore
     private let promptUser: (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult
     private struct ApprovalWaiter {
         let id: UUID
@@ -60,6 +61,7 @@ actor ApprovalService {
         recognizedElementStore: RecognizedElementStore? = nil,
         modeState: ApprovalModeState = .shared,
         maxPendingApprovals: Int = 64,
+        engineActivity: EngineActivityStore = .shared,
         promptUser: @escaping (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult = {
             await ApprovalCoordinator.shared.askForApproval(request: $0)
         }
@@ -67,6 +69,7 @@ actor ApprovalService {
         let recognizedElementStore = try recognizedElementStore ?? RecognizedElementStore(fileManager: fileManager)
         self.recognizedElementStore = recognizedElementStore
         self.modeState = modeState
+        self.engineActivity = engineActivity
         self.maxPendingApprovals = max(0, maxPendingApprovals)
         self.promptUser = promptUser
         self.denyRules = denyRules ?? [
@@ -193,6 +196,9 @@ actor ApprovalService {
             case .denied:
                 return .denied(request: request, reason: "engine \(engine.name)")
             case .approved:
+                if let group = engine.activityGroup {
+                    engineActivity.record(group)
+                }
                 return .approved(request: request, reason: "Auto rule, engine \(engine.name)")
             case let .needsConsent(prompt):
                 if selectedEngine == nil {

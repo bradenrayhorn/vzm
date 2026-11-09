@@ -2,6 +2,7 @@ import Foundation
 
 final class NixCacheApprovalEngine: PatternApprovalEngine {
     override var name: String { "NixCache" }
+    override var activityGroup: EngineActivityGroup? { .nix }
 
     private static let urlRegexes: [NSRegularExpression] = [
         try! NSRegularExpression(pattern: #"^channels\.nixos\.org/flake-registry\.json$"#),
