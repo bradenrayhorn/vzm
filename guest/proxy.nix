@@ -19,6 +19,7 @@ let
     GIT_SSL_CAINFO = caBundle;
     REQUESTS_CA_BUNDLE = caBundle;
     NODE_EXTRA_CA_CERTS = caBundle;
+    HEX_CACERTS_PATH = caBundle;
   };
   proxyEnv =
     baseProxyEnv
@@ -35,6 +36,7 @@ let
     GIT_SSL_CAINFO = lib.mkForce proxyEnv.GIT_SSL_CAINFO;
     REQUESTS_CA_BUNDLE = lib.mkForce proxyEnv.REQUESTS_CA_BUNDLE;
     NODE_EXTRA_CA_CERTS = lib.mkForce proxyEnv.NODE_EXTRA_CA_CERTS;
+    HEX_CACERTS_PATH = lib.mkForce proxyEnv.HEX_CACERTS_PATH;
   };
 in
 {
@@ -56,7 +58,7 @@ in
 
     # Preserve CA trust for root-side nixos-rebuild fetches as well.
     security.sudo.extraConfig = ''
-      Defaults env_keep += "SSL_CERT_FILE NIX_SSL_CERT_FILE GIT_SSL_CAINFO REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS"
+      Defaults env_keep += "SSL_CERT_FILE NIX_SSL_CERT_FILE GIT_SSL_CAINFO REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS HEX_CACERTS_PATH"
       ${lib.optionalString cfg.java.enable ''Defaults env_keep += "JAVA_TOOL_OPTIONS GRADLE_OPTS"''}
     '';
 
