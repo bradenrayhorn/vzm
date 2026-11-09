@@ -1,4 +1,10 @@
-{ modulesPath, pkgs, lib, nixpkgs, ... }:
+{
+  modulesPath,
+  pkgs,
+  lib,
+  nixpkgs,
+  ...
+}:
 {
   imports = [
     (modulesPath + "/profiles/qemu-guest.nix")
@@ -69,6 +75,9 @@
   boot.loader.efi.canTouchEfiVariables = false;
   boot.kernelModules = [ ];
   boot.extraModulePackages = [ ];
+
+  # vm accessed over ssh, do not need console access
+  console.enable = false;
 
   # Log kernel issues
   boot.kernel.sysctl."debug.exception-trace" = 1;
