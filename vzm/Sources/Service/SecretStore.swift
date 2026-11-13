@@ -4,6 +4,13 @@ import Security
 struct StoredSecret: Codable {
     let name: String
     let hosts: [String]
+
+    func permits(host: String, requiringExplicitHost: Bool = false) -> Bool {
+        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard !normalized.isEmpty else { return false }
+        return (hosts.isEmpty && !requiringExplicitHost) || hosts.contains(normalized)
+    }
 }
 
 final class SecretStore {

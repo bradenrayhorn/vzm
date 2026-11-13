@@ -122,6 +122,7 @@ class ApprovalModeCoordinator {
     static let shared = ApprovalModeCoordinator()
 
     private(set) var mode: ApprovalMode = .auto
+    private(set) var allowSecrets = false
     private var expirationTask: Task<Void, Never>?
     private let modeState = ApprovalModeState.shared
 
@@ -131,6 +132,7 @@ class ApprovalModeCoordinator {
         expirationTask?.cancel()
         expirationTask = nil
         modeState.select(mode)
+        allowSecrets = false
         self.mode = modeState.current()
 
         guard case let .approveEverything(deadline) = self.mode else { return }
@@ -142,6 +144,11 @@ class ApprovalModeCoordinator {
             }
             self?.select(.auto)
         }
+    }
+
+    func setAllowSecrets(_ enabled: Bool) {
+        modeState.setAllowSecrets(enabled)
+        allowSecrets = modeState.policy().allowSecrets
     }
 
     func activate(for duration: TemporaryApprovalDuration) {
@@ -172,6 +179,16 @@ struct ApprovalModeMenuView: View {
                 } else {
                     Text("Approve Everything")
                 }
+            }
+
+            if case .approveEverything = coordinator.mode {
+                Toggle("Allow secrets to permitted hosts", isOn: Binding(
+                    get: { coordinator.allowSecrets },
+                    set: { coordinator.setAllowSecrets($0) }
+                ))
+                Text("Requires explicit allowed hosts; resets when this mode ends.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Button {

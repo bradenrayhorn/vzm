@@ -326,7 +326,7 @@ private func resolveSecretSubstitutions(for request: ProxyApprovalRequest) throw
         guard let metadata = metadataByName[name] else {
             throw SecretStore.Error.secretNotFound(name)
         }
-        guard metadata.hosts.isEmpty || metadata.hosts.contains(normalizedDomain) else {
+        guard metadata.permits(host: normalizedDomain) else {
             throw ProxySecretResolutionError.unauthorized(name, normalizedDomain)
         }
         substitutions[name] = try secretStore.readSecret(named: name)

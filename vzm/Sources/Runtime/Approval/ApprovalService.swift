@@ -42,6 +42,7 @@ actor ApprovalService {
     private let denyRules: [any DenyRule]
     private let engines: [any ApprovalEngine]
     private let modeState: ApprovalModeState
+    private let secretMetadata: () throws -> [StoredSecret]
     private let engineActivity: EngineActivityStore
     private let promptUser: (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult
     private struct ApprovalWaiter {
@@ -60,6 +61,7 @@ actor ApprovalService {
         engines: [any ApprovalEngine]? = nil,
         recognizedElementStore: RecognizedElementStore? = nil,
         modeState: ApprovalModeState = .shared,
+        secretMetadata: @escaping () throws -> [StoredSecret] = { try SecretStore().listSecrets() },
         maxPendingApprovals: Int = 64,
         engineActivity: EngineActivityStore = .shared,
         promptUser: @escaping (ApprovalCoordinatorRequest) async -> ApprovalCoordinatorResult = {
@@ -69,6 +71,7 @@ actor ApprovalService {
         let recognizedElementStore = try recognizedElementStore ?? RecognizedElementStore(fileManager: fileManager)
         self.recognizedElementStore = recognizedElementStore
         self.modeState = modeState
+        self.secretMetadata = secretMetadata
         self.engineActivity = engineActivity
         self.maxPendingApprovals = max(0, maxPendingApprovals)
         self.promptUser = promptUser
@@ -162,7 +165,8 @@ actor ApprovalService {
 
         request.headers = ApprovalHeaderMasker.maskSafeHeaders(for: request, knownUserAgents: knownUserAgents)
 
-        let mode = modeState.current()
+        let policy = modeState.policy()
+        let mode = policy.mode
 
         // Temporary CONNECT approval must not establish persistent domain trust.
         if case .approveEverything = mode, request.type == "CONNECT" {
@@ -188,6 +192,17 @@ actor ApprovalService {
         if case .approveEverything = mode,
            !isGit, request.secrets.isEmpty {
             return .approved(request: request, reason: "mode Approve Everything")
+        }
+
+        // Only explicit host restrictions qualify for this temporary shortcut.
+        // Final substitution independently rechecks authorization and reads values.
+        if case .approveEverything = mode, policy.allowSecrets,
+           request.type == "REQUEST", !request.secrets.isEmpty,
+           let metadata = try? secretMetadata(),
+           Set(request.secretNames).allSatisfy({ name in
+               metadata.contains { $0.name == name && $0.permits(host: request.domain, requiringExplicitHost: true) }
+           }) {
+            return .approved(request: request, reason: "mode Approve Everything, explicitly permitted secrets")
         }
 
         var selectedEngine: SelectedEngine?

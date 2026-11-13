@@ -105,6 +105,84 @@ final class ApprovalTests: XCTestCase {
         )
     }
 
+    func testTemporarySecretOptInRequiresEveryExplicitHost() async throws {
+        let prompts = self.prompts!
+        let service = try ApprovalService(
+            denyRules: [], engines: [], recognizedElementStore: store, modeState: mode,
+            secretMetadata: { [
+                StoredSecret(name: "allowed", hosts: ["example.com"]),
+                StoredSecret(name: "other", hosts: ["other.com"]),
+                StoredSecret(name: "unrestricted", hosts: []),
+            ] },
+            promptUser: { await prompts.ask($0) }
+        )
+        var r = request("example.com/path")
+        r.secrets = [.init(name: "allowed", location: .body)]
+        mode.select(.approveEverything(until: Date().addingTimeInterval(60)))
+        let defaultResult = await service.askForApproval(request: r)
+        XCTAssertFalse(defaultResult)
+        mode.setAllowSecrets(true)
+        let allowedResult = await service.askForApproval(request: r)
+        XCTAssertTrue(allowedResult)
+        XCTAssertFalse(store.contains(r.domain, type: .domain))
+        for name in ["other", "unrestricted", "missing"] {
+            var mixed = r
+            mixed.secrets.append(.init(name: name, location: .header))
+            let result = await service.askForApproval(request: mixed)
+            XCTAssertFalse(result)
+        }
+        for type in ["GIT", "TCP_CONNECT", "WEBSOCKET"] {
+            var excluded = r
+            excluded.type = type
+            let result = await service.askForApproval(request: excluded)
+            XCTAssertFalse(result)
+        }
+        mode.select(.auto)
+        XCTAssertFalse(mode.policy().allowSecrets)
+        mode.select(.approveEverything(until: Date().addingTimeInterval(60)))
+        XCTAssertFalse(mode.policy().allowSecrets)
+        mode.setAllowSecrets(true)
+        XCTAssertEqual(mode.policy(now: Date().addingTimeInterval(120)).mode, .auto)
+        XCTAssertFalse(mode.policy().allowSecrets)
+    }
+
+    func testTemporarySecretsPreserveDenialsAndFailClosedOnMetadataErrors() async throws {
+        let prompts = self.prompts!
+        var r = request("example.com/path")
+        r.secrets = [.init(name: "s", location: .body)]
+        mode.select(.approveEverything(until: Date().addingTimeInterval(60)))
+        mode.setAllowSecrets(true)
+        let denied = try ApprovalService(
+            denyRules: [DenyRuleObserver(matches: true) { _ in }], engines: [],
+            recognizedElementStore: store, modeState: mode,
+            secretMetadata: { [StoredSecret(name: "s", hosts: ["example.com"])] },
+            promptUser: { _ in XCTFail("Hard denial must not prompt"); return .approveOnce }
+        )
+        let deniedResult = await denied.askForApproval(request: r)
+        XCTAssertFalse(deniedResult)
+        let unavailable = try ApprovalService(
+            denyRules: [], engines: [], recognizedElementStore: store, modeState: mode,
+            secretMetadata: { throw SecretStore.Error.invalidMetadata("s") },
+            promptUser: { await prompts.ask($0) }
+        )
+        let unavailableResult = await unavailable.askForApproval(request: r)
+        XCTAssertFalse(unavailableResult)
+        mode.select(.strict)
+        XCTAssertFalse(mode.policy().allowSecrets)
+        mode.setAllowSecrets(true)
+        XCTAssertFalse(mode.policy().allowSecrets)
+    }
+
+    func testSecretHostPolicy() {
+        let restricted = StoredSecret(name: "s", hosts: ["example.com"])
+        XCTAssertTrue(restricted.permits(host: " EXAMPLE.COM. ", requiringExplicitHost: true))
+        XCTAssertFalse(restricted.permits(host: "sub.example.com", requiringExplicitHost: true))
+        XCTAssertFalse(restricted.permits(host: "example.com.evil", requiringExplicitHost: true))
+        let unrestricted = StoredSecret(name: "s", hosts: [])
+        XCTAssertTrue(unrestricted.permits(host: "example.com"))
+        XCTAssertFalse(unrestricted.permits(host: "example.com", requiringExplicitHost: true))
+    }
+
     private func chatGPTRequest(accountID: String = "91691066-ac6c-4de7-b6cc-6e53b2ff7b34") -> ProxyApprovalRequest {
         var r = request("chatgpt.com/backend-api/codex/responses", type: "WEBSOCKET")
         r.headers = [ProxyApprovalHeader(name: "Chatgpt-Account-Id", value: accountID)]
