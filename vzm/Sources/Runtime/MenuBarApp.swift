@@ -25,7 +25,6 @@ struct VZMMenuBarApp: App {
 
     @State private var approvalModeCoordinator = ApprovalModeCoordinator.shared
     @State private var portExposureCoordinator = PortExposureCoordinator.shared
-    @State private var activityCoordinator = ProxyActivityCoordinator.shared
     @State private var overlayCoordinator = EngineActivityOverlayCoordinator.shared
 
     var body: some Scene {
@@ -37,8 +36,6 @@ struct VZMMenuBarApp: App {
                 Divider()
                 PortExposureMenuView(coordinator: portExposureCoordinator)
                 Divider()
-                ProxyActivityMenuView(snapshot: activityCoordinator.snapshot)
-                Divider()
                 Toggle("Auto overlay", isOn: Binding(
                     get: { overlayCoordinator.isEnabled },
                     set: { overlayCoordinator.setEnabled($0) }
@@ -46,10 +43,7 @@ struct VZMMenuBarApp: App {
             }
             .padding(.vertical, 4)
         } label: {
-            ProxyActivityMenuBarLabel(
-                vmName: activityCoordinator.vmName ?? "vm",
-                snapshot: activityCoordinator.snapshot
-            )
+            ProxyActivityStatusLabel()
         }
     }
 }

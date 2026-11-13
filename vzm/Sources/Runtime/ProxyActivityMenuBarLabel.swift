@@ -29,6 +29,19 @@ enum ProxyActivityLevel: String {
     }
 }
 
+/// Observe activity only inside the label, not in the scene or menu content.
+/// This keeps periodic traffic updates from rebuilding the open menu.
+struct ProxyActivityStatusLabel: View {
+    private let coordinator = ProxyActivityCoordinator.shared
+
+    var body: some View {
+        ProxyActivityMenuBarLabel(
+            vmName: coordinator.vmName ?? "vm",
+            snapshot: coordinator.snapshot
+        )
+    }
+}
+
 /// Use an image because MenuBarExtra's native status button does not reliably
 /// preserve arbitrary SwiftUI stacks. Non-template rendering preserves colors.
 struct ProxyActivityMenuBarLabel: View {
@@ -36,7 +49,7 @@ struct ProxyActivityMenuBarLabel: View {
     let snapshot: ProxyActivitySnapshot?
     @Environment(\.colorScheme) private var colorScheme
 
-    // Thresholds apply to the same 10-second average as the numeric menu rates.
+    // Thresholds apply to the monitor's 10-second average.
     static let mediumAttemptsPerSecond: Double = 1
     static let mediumMbps: Double = 10
     static let hyperactiveAttemptsPerSecond: Double = 10
@@ -61,14 +74,7 @@ struct ProxyActivityMenuBarLabel: View {
 
     private var description: String {
         guard let snapshot else { return "\(vmName): proxy activity is not ready" }
-        return "\(vmName): \(Self.level(for: snapshot).rawValue) proxy activity. "
-            + "\(Self.number(snapshot.attemptsPerSecond)) approval attempts/sec, "
-            + "download \(Self.number(snapshot.downloadMbps)) Mbps, "
-            + "upload \(Self.number(snapshot.uploadMbps)) Mbps."
-    }
-
-    static func number(_ value: Double) -> String {
-        value.formatted(.number.precision(.fractionLength(1)).grouping(.never))
+        return "\(vmName): \(Self.level(for: snapshot).rawValue) proxy activity."
     }
 
     /// OR across metrics: any metric reaching a threshold lights that level.
@@ -134,23 +140,5 @@ struct ProxyActivityMenuBarLabel: View {
         }
         image.isTemplate = false
         return image
-    }
-}
-
-struct ProxyActivityMenuView: View {
-    let snapshot: ProxyActivitySnapshot?
-
-    var body: some View {
-        Section("Proxy activity") {
-            if let snapshot {
-                Text("Requests: \(ProxyActivityMenuBarLabel.number(snapshot.attemptsPerSecond)) activities/s")
-                Text("Download: \(ProxyActivityMenuBarLabel.number(snapshot.downloadMbps)) Mbps")
-                Text("Upload: \(ProxyActivityMenuBarLabel.number(snapshot.uploadMbps)) Mbps")
-            } else {
-                Text("VM proxy activity is not ready")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(minWidth: 280, alignment: .leading)
     }
 }
