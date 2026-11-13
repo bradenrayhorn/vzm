@@ -280,8 +280,11 @@ final class ApprovalTests: XCTestCase {
     func testTrackingRulePreservesDomainMatchingAcrossRequestTypes() {
         let rule = DenyTrackingRule()
         XCTAssertEqual(rule.name, "DenyTracking")
-        for domain in ["telemetry.nextjs.org", "config.liquibase.com"] {
-            for variant in [domain, domain.uppercased(), " \n\(domain)\t", domain + ".", domain + ":443"] {
+        for domain in [
+            "telemetry.nextjs.org", "config.liquibase.com", "api.keydb.dev",
+            "instance-data.ec2.internal", "metadata.google.internal", "register.cockroachdb.com"
+        ] {
+            for variant in [domain, domain.uppercased(), " \n\(domain)\t", domain + ".", domain + ":80", domain + ":443"] {
                 for type in ["REQUEST", "CONNECT", "TCP_CONNECT", "GIT", "WEBSOCKET"] {
                     var r = request(domain + "/collect", type: type)
                     r.domain = variant
