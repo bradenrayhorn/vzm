@@ -9,7 +9,8 @@ final class DenyTrackingRule: DenyRule {
         "api.keydb.dev",
         "instance-data.ec2.internal",
         "metadata.google.internal",
-        "register.cockroachdb.com"
+        "register.cockroachdb.com",
+        "clients2.google.com"
     ]
 
     func shouldDeny(_ request: ProxyApprovalRequest) -> Bool {
